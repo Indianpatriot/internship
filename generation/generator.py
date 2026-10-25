@@ -37,6 +37,7 @@ def generate_question(chunk, level, client, rng=None, max_retries=3, marks=None,
     rng = rng or random.Random()
     context = " ".join(chunk["text"].split()[:MAX_CONTEXT_WORDS])
     q, reason, attempts = "", "no output", 0
+    ok = False
     for attempts in range(1, max_retries + 1):
         verbs = sample_verbs(level, k_verbs, rng)
         prompt = build_prompt(context, level, verbs, marks)
@@ -78,3 +79,32 @@ def generate_paper(chunks, level_counts, client, seed=None, marks=None, on_progr
             if on_progress:
                 on_progress(rec)
     return {"questions": questions, "rejected": rejected}
+
+def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
+    """slots: [{'co': 'CO1', 'level': 'L1', 'marks': 5}, ...]"""
+    rng = random.Random(seed)
+    usable = [c for c in chunks
+              if c.get("word_count", len(c["text"].split())) >= MIN_CONTEXT_WORDS]
+    questions, rejected, unfilled, seen = [], [], [], []
+    for slot in slots:
+        pool = sorted(
+            usable,
+            key=lambda c: c.get("co_scores", {}).get(slot["co"], float("-inf")),
+            reverse=True,
+        )[:10]
+        rng.shuffle(pool)
+        for chunk in pool * 2:
+            rec = generate_question(chunk, slot["level"], client, rng, marks=slot.get("marks"))
+            if not rec["valid"] or is_duplicate(rec["question"], seen):
+                rejected.append(rec)
+                continue
+            rec["co"] = slot["co"]
+            rec["id"] = f"Q{len(questions) + 1:03d}"
+            seen.append(rec["question"])
+            questions.append(rec)
+            if on_progress:
+                on_progress(rec)
+            break
+        else:
+            unfilled.append(slot)       # no valid question found for this slot
+    return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
