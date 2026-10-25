@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 import config
+from export_utils import create_docx_exam_paper, create_pdf_exam_paper
 from generation.mock_client import MockClient
 from generation.ollama_client import OllamaClient
 from generation.generator import generate_paper_by_slots
@@ -46,24 +47,6 @@ st.markdown(
         color: #64748b;
         font-size: 1.05rem;
         margin-bottom: 1.5rem;
-    }
-    .section-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 1.25rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    .badge-pill {
-        display: inline-block;
-        padding: 0.25rem 0.65rem;
-        font-size: 0.8rem;
-        font-weight: 600;
-        border-radius: 9999px;
-        background-color: #e0f2fe;
-        color: #0369a1;
-        margin-right: 0.5rem;
     }
     .metric-badge {
         font-size: 1.1rem;
@@ -110,7 +93,6 @@ def get_cached_chunks(file_bytes: bytes, filename: str):
 def get_cached_scored_chunks(_chunks, outcomes_tuple: tuple[tuple[str, str], ...]):
     """Cache outcome scoring keyed on outcome descriptions."""
     outcomes_dict = dict(outcomes_tuple)
-    # Deep copy to ensure cache immutability
     chunks_copy = [dict(c) for c in _chunks]
     return score_chunks_against_outcomes(chunks_copy, outcomes_dict)
 
@@ -120,7 +102,7 @@ def get_cached_scored_chunks(_chunks, outcomes_tuple: tuple[tuple[str, str], ...
 # -----------------------------------------------------------------------------
 if "outcomes" not in st.session_state:
     st.session_state.outcomes = [
-        {"code": "CO1", "desc": "Understand core theoretical concepts, definitions, and principles."},
+        {"code": "CO1", "desc": "Understand foundational concepts, terminology, and principles."},
         {"code": "CO2", "desc": "Analyze system architectures, evaluate performance metrics, and solve problems."},
     ]
 
@@ -143,10 +125,14 @@ with st.sidebar:
     st.header("⚙️ Generator Settings")
     st.markdown("Configure the LLM generation client and model parameters.")
 
+    # Probe Ollama status to determine smart default
+    probe_client = OllamaClient(model=config.OLLAMA_MODEL)
+    ollama_online = probe_client.is_up()
+
     use_mock = st.toggle(
         "Use mock client",
-        value=True,
-        help="Use MockClient for offline testing without requiring an Ollama instance.",
+        value=not ollama_online,
+        help="Toggle between offline MockClient and local Ollama server.",
     )
 
     model_name = st.text_input(
@@ -156,13 +142,13 @@ with st.sidebar:
     )
 
     if use_mock:
-        st.info("💡 **Mock Client Active**: Questions are generated deterministically offline.")
+        st.warning("⚠️ **Mock Client Active**: Questions are generated heuristically offline without an LLM. Toggle OFF to use Ollama for AI generation.")
     else:
-        ollama_client = OllamaClient(model=model_name)
-        if ollama_client.is_up():
-            st.success(f"🟢 Ollama Connected ({config.OLLAMA_HOST})")
+        active_client = OllamaClient(model=model_name)
+        if active_client.is_up():
+            st.success(f"🟢 **Ollama Connected**: `{model_name}` ({config.OLLAMA_HOST})")
         else:
-            st.warning(f"🟡 Ollama server not reachable at `{config.OLLAMA_HOST}`. Start it with `ollama serve`.")
+            st.error(f"🔴 Ollama server not reachable at `{config.OLLAMA_HOST}`. Start it with `ollama serve`.")
 
     st.divider()
     st.markdown(
@@ -365,6 +351,7 @@ if generate_clicked:
             status_box.write("📄 Ingesting and chunking PDF document...")
             file_bytes = uploaded_pdf.getvalue()
             chunks = get_cached_chunks(file_bytes, uploaded_pdf.name)
+            st.session_state.course_title = os.path.splitext(uploaded_pdf.name)[0].replace("-", " ").replace("_", " ").title()
             status_box.write(f"✓ Ingested {len(chunks)} chunks from `{uploaded_pdf.name}`.")
 
             # 2. Embedding & Scoring
@@ -452,15 +439,47 @@ if st.session_state.results:
             use_container_width=True,
         )
 
-        # Download CSV Button
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Download Question Paper (CSV)",
-            data=csv_bytes,
-            file_name="question_paper.csv",
-            mime="text/csv",
-            type="primary",
+        # Export Buttons (DOCX and PDF)
+        st.write("#### 📥 Export Question Paper")
+        course_title = getattr(st.session_state, "course_title", "Course Examination")
+        outcomes_map = {
+            o["code"].strip(): o["desc"].strip()
+            for o in st.session_state.outcomes
+            if o["code"].strip()
+        }
+
+        docx_data = create_docx_exam_paper(
+            questions=questions,
+            course_name=course_title,
+            subject_code="CO-RAG",
+            outcomes=outcomes_map,
         )
+        pdf_data = create_pdf_exam_paper(
+            questions=questions,
+            course_name=course_title,
+            subject_code="CO-RAG",
+            outcomes=outcomes_map,
+        )
+
+        col_docx, col_pdf, _ = st.columns([2, 2, 3])
+        with col_docx:
+            st.download_button(
+                label="📄 Download as DOCX",
+                data=docx_data,
+                file_name="question_paper.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",
+                use_container_width=True,
+            )
+        with col_pdf:
+            st.download_button(
+                label="📑 Download as PDF",
+                data=pdf_data,
+                file_name="question_paper.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
 
         with st.expander("🔍 View Technical Question Metadata"):
             st.json(questions)

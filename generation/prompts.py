@@ -1,14 +1,15 @@
 """Step 3b - prompt templates (one base template + per-level hints)."""
 from blooms.verb_bank import LEVEL_NAMES, normalize_level
 
-BASE = """You are an exam question setter.
-Using ONLY the context below, write exactly ONE {name}-level (Bloom's {level}) question.
+BASE = """You are an expert exam question setter.
+Using ONLY the context below, write exactly ONE high-quality, clear, sensible {name}-level (Bloom's {level}) exam question.
 The question MUST start with one of these verbs: {verbs}.
 Rules:
 - Use only facts present in the context. Do not use outside knowledge.
-- Do not mention "the context", "the passage" or "the text" in the question.
+- Do not mention "the context", "the passage", "the text", "the diagram", "the author", or "the tutorial" in the question.
+- Focus purely on core technical concepts, definitions, algorithms, or mechanisms. The question must be realistic and complete.
 - {hint}{marks}
-- Output only the question text. No numbering, no preamble, no answer.
+- Output only the question text ending with '?'. No numbering, no preamble, no answer.
 
 Context:
 \"\"\"
