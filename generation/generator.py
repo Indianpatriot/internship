@@ -80,8 +80,9 @@ def generate_paper(chunks, level_counts, client, seed=None, marks=None, on_progr
                 on_progress(rec)
     return {"questions": questions, "rejected": rejected}
 
+
 def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
-    """slots: [{'co': 'CO1', 'level': 'L1', 'marks': 5}, ...]"""
+    """slots: [{'co': 'CO1', 'level': 'L1', 'marks': 5, 'part': 'Part A', 'id': '1(a)'}, ...]"""
     rng = random.Random(seed)
     usable = [c for c in chunks
               if c.get("word_count", len(c["text"].split())) >= MIN_CONTEXT_WORDS]
@@ -99,7 +100,9 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
                 rejected.append(rec)
                 continue
             rec["co"] = slot["co"]
-            rec["id"] = f"Q{len(questions) + 1:03d}"
+            rec["id"] = slot.get("id") or slot.get("label") or f"Q{len(questions) + 1:03d}"
+            if "part" in slot:
+                rec["part"] = slot["part"]
             seen.append(rec["question"])
             questions.append(rec)
             if on_progress:
@@ -107,4 +110,4 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
             break
         else:
             unfilled.append(slot)       # no valid question found for this slot
-    return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
+    return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
