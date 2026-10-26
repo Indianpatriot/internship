@@ -2,6 +2,11 @@
 
 Zero-cost, local RAG question paper generation mapped to Course Outcomes (CO/LO)
 and Bloom's Taxonomy (BT) levels.
+
+Vikas Deliverables:
+- Step 1: 50-Mark Blueprint structure (Part A: 10m, Part B: 40m with a/b subparts).
+- Step 2: Table layout (S.No, Question, Marks, BT, CO) matching standard exam papers.
+- Step 3: Streamlit UI with 1-click blueprint presets, live BT/CO analytics, and DOCX/PDF export.
 """
 import os
 import re
@@ -10,6 +15,11 @@ import pandas as pd
 import streamlit as st
 
 import config
+from blueprint import (
+    get_50_mark_blueprint,
+    get_25_mark_blueprint,
+    calculate_blueprint_stats,
+)
 from export_utils import create_docx_exam_paper, create_pdf_exam_paper
 from generation.mock_client import MockClient
 from generation.ollama_client import OllamaClient
@@ -27,7 +37,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for rich aesthetics
 st.markdown(
     """
     <style>
@@ -49,13 +58,34 @@ st.markdown(
         margin-bottom: 1.5rem;
     }
     .metric-badge {
-        font-size: 1.1rem;
-        font-weight: 700;
+        font-size: 0.95rem;
+        font-weight: 600;
         color: #0f172a;
-        background: #f1f5f9;
-        padding: 0.4rem 0.8rem;
+        background: #f8fafc;
+        padding: 0.45rem 0.85rem;
         border-radius: 8px;
         border: 1px solid #cbd5e1;
+        display: inline-block;
+        margin-right: 0.4rem;
+        margin-bottom: 0.4rem;
+    }
+    .badge-success {
+        background: #ecfdf5;
+        border-color: #6ee7b7;
+        color: #065f46;
+    }
+    .badge-warning {
+        background: #fffbeb;
+        border-color: #fde68a;
+        color: #92400e;
+    }
+    .part-banner {
+        font-weight: 700;
+        background: #e2e8f0;
+        color: #1e3a8a;
+        padding: 0.3rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.9rem;
         display: inline-block;
     }
     </style>
@@ -104,26 +134,32 @@ if "outcomes" not in st.session_state:
     st.session_state.outcomes = [
         {"code": "CO1", "desc": "Understand foundational concepts, terminology, and principles."},
         {"code": "CO2", "desc": "Analyze system architectures, evaluate performance metrics, and solve problems."},
+        {"code": "CO3", "desc": "Apply design principles and evaluate trade-offs in real-world scenarios."},
     ]
 
+available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
+if not available_cos:
+    available_cos = ["CO1"]
+
 if "slots" not in st.session_state:
-    st.session_state.slots = [
-        {"co": "CO1", "level": "L1", "marks": 5},
-        {"co": "CO1", "level": "L2", "marks": 5},
-        {"co": "CO2", "level": "L3", "marks": 10},
-        {"co": "CO2", "level": "L4", "marks": 10},
-    ]
+    st.session_state.slots = get_50_mark_blueprint(available_cos)
 
 if "results" not in st.session_state:
     st.session_state.results = None
 
+if "institution_name" not in st.session_state:
+    st.session_state.institution_name = "EXAMINATION QUESTION PAPER"
+
+if "subject_code" not in st.session_state:
+    st.session_state.subject_code = "CS-302"
+
 
 # -----------------------------------------------------------------------------
-# Sidebar: LLM Configuration
+# Sidebar: LLM Configuration & Exam Metadata
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Generator Settings")
-    st.markdown("Configure the LLM generation client and model parameters.")
+    st.caption("Configure generation mode and exam header details.")
 
     # Probe Ollama status to determine smart default
     probe_client = OllamaClient(model=config.OLLAMA_MODEL)
@@ -142,7 +178,7 @@ with st.sidebar:
     )
 
     if use_mock:
-        st.warning("⚠️ **Mock Client Active**: Questions are generated heuristically offline without an LLM. Toggle OFF to use Ollama for AI generation.")
+        st.warning("⚠️ **Mock Client Active**: Offline mode enabled. Questions generate instantaneously without Ollama.")
     else:
         active_client = OllamaClient(model=model_name)
         if active_client.is_up():
@@ -151,13 +187,26 @@ with st.sidebar:
             st.error(f"🔴 Ollama server not reachable at `{config.OLLAMA_HOST}`. Start it with `ollama serve`.")
 
     st.divider()
+    st.subheader("📝 Exam Paper Details")
+    st.session_state.institution_name = st.text_input(
+        "Exam Title / Institute",
+        value=st.session_state.institution_name,
+        help="Appears as the top header on exported DOCX and PDF papers.",
+    )
+    st.session_state.subject_code = st.text_input(
+        "Subject Code",
+        value=st.session_state.subject_code,
+        help="Course or subject code (e.g., CS-302).",
+    )
+
+    st.divider()
     st.markdown(
         """
         **Pipeline Information:**
         - **Model:** `BAAI/bge-small-en-v1.5`
         - **Embedding Mode:** Normalized Cosine Similarity
         - **Bloom's Levels:** L1 to L5
-        - **Constraint:** Zero external API cost
+        - **Vikas Role:** Blueprint, Paper Assembly & DOCX Export
         """
     )
 
@@ -168,7 +217,7 @@ with st.sidebar:
 st.markdown('<div class="main-title">Outcome-Aware Question Paper Generator</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Upload a textbook PDF, define custom Course/Learning Outcomes (CO/LO), '
-    'and generate a balanced exam paper mapped to Bloom\'s Taxonomy.</div>',
+    'and generate a balanced 50-mark exam paper mapped to Bloom\'s Taxonomy.</div>',
     unsafe_allow_html=True,
 )
 
@@ -213,7 +262,6 @@ if outcomes_to_remove:
 col_btn, _ = st.columns([2, 5])
 with col_btn:
     if st.button("➕ Add outcome", key="btn_add_outcome"):
-        # Auto-detect next CO code number
         existing_nums = [
             int(m.group(1))
             for o in st.session_state.outcomes
@@ -226,26 +274,74 @@ with col_btn:
 st.divider()
 
 # -----------------------------------------------------------------------------
-# Section 2: Question Blueprint Slots
+# Section 2: Question Blueprint Slots (Vikas Step 1)
 # -----------------------------------------------------------------------------
 st.subheader("2. Question Paper Blueprint (Slots)")
-st.caption("Specify questions with target Bloom's Taxonomy level, Course Outcome, and marks.")
+st.caption(
+    "Define the 50-mark structure: Part A (Short Questions) and Part B (Long questions with a/b subparts). "
+    "Select a preset below or customize individual question slots."
+)
 
 # Extract current outcome codes
 available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
 if not available_cos:
     available_cos = ["CO1"]
 
-total_marks = sum(int(s.get("marks", 0)) for s in st.session_state.slots)
-total_questions = len(st.session_state.slots)
+# Blueprint Preset Loader Buttons
+col_p1, col_p2, col_p3 = st.columns([2.5, 2.5, 2])
+with col_p1:
+    if st.button("🎓 Load 50-Mark Blueprint (Standard)", use_container_width=True):
+        st.session_state.slots = get_50_mark_blueprint(available_cos)
+        st.rerun()
+with col_p2:
+    if st.button("📝 Load 25-Mark Blueprint (Internal)", use_container_width=True):
+        st.session_state.slots = get_25_mark_blueprint(available_cos)
+        st.rerun()
+with col_p3:
+    if st.button("🔄 Reset to Blank", use_container_width=True):
+        st.session_state.slots = [
+            {"part": "Part A", "id": "1", "co": available_cos[0], "level": "L1", "marks": 2}
+        ]
+        st.rerun()
 
-m_col1, m_col2 = st.columns([1, 4])
-with m_col1:
-    st.markdown(f'<div class="metric-badge">Total Marks: {total_marks}</div>', unsafe_allow_html=True)
-with m_col2:
-    st.markdown(f'<div class="metric-badge">Questions: {total_questions}</div>', unsafe_allow_html=True)
+# Calculate Blueprint Statistics
+stats = calculate_blueprint_stats(st.session_state.slots)
+total_marks = stats["total_marks"]
+total_questions = stats["total_questions"]
+part_marks = stats["part_marks"]
 
-st.write("")
+badge_class = "badge-success" if total_marks == 50 else "badge-warning"
+mark_target_label = "✅ Target 50 Marks Met" if total_marks == 50 else f"Target: 50 Marks (Current: {total_marks})"
+
+st.markdown(
+    f"""
+    <div style="margin-top: 0.6rem; margin-bottom: 0.8rem;">
+        <span class="metric-badge {badge_class}"><b>Total Marks:</b> {total_marks} ({mark_target_label})</span>
+        <span class="metric-badge"><b>Total Slots:</b> {total_questions}</span>
+        <span class="metric-badge"><b>Part A:</b> {part_marks.get('Part A', 0)} Marks</span>
+        <span class="metric-badge"><b>Part B:</b> {part_marks.get('Part B', 0)} Marks</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Bloom's & CO Spread Badges
+with st.expander("📊 View Bloom's Taxonomy & Course Outcome Spread", expanded=False):
+    col_bt_dist, col_co_dist = st.columns(2)
+    with col_bt_dist:
+        st.markdown("**Bloom's Level Distribution:**")
+        bt_spread_str = " | ".join(
+            f"**{lvl}**: {marks}m ({stats['bt_percent'].get(lvl, 0)}%)"
+            for lvl, marks in sorted(stats["bt_marks"].items())
+        )
+        st.info(bt_spread_str or "No slots defined")
+    with col_co_dist:
+        st.markdown("**Course Outcome Coverage:**")
+        co_spread_str = " | ".join(
+            f"**{co}**: {marks}m ({stats['co_counts'].get(co, 0)} Qs)"
+            for co, marks in sorted(stats["co_marks"].items())
+        )
+        st.success(co_spread_str or "No slots defined")
 
 bt_options = ["L1", "L2", "L3", "L4", "L5"]
 bt_labels = {
@@ -256,52 +352,83 @@ bt_labels = {
     "L5": "L5 - Evaluate",
 }
 
+# Slots Table Header
+hdr_col1, hdr_col2, hdr_col3, hdr_col4, hdr_col5, hdr_col6 = st.columns([1.5, 1.2, 1.8, 2.2, 1.2, 0.7])
+with hdr_col1:
+    st.caption("Section / Part")
+with hdr_col2:
+    st.caption("Q.No / Subpart")
+with hdr_col3:
+    st.caption("Outcome (CO)")
+with hdr_col4:
+    st.caption("Bloom Level")
+with hdr_col5:
+    st.caption("Marks")
+with hdr_col6:
+    st.caption("Action")
+
 slots_to_remove = []
 for j, slot in enumerate(st.session_state.slots):
-    col_co, col_bt, col_marks, col_del_slot = st.columns([2, 2.5, 1.5, 0.8])
+    col_part, col_id, col_co, col_bt, col_marks, col_del_slot = st.columns([1.5, 1.2, 1.8, 2.2, 1.2, 0.7])
 
-    # Choose default index for outcome
-    co_val = slot.get("co", available_cos[0])
-    co_index = available_cos.index(co_val) if co_val in available_cos else 0
+    with col_part:
+        part_options = ["Part A", "Part B", "Part C"]
+        curr_part = slot.get("part", "Part A")
+        part_idx = part_options.index(curr_part) if curr_part in part_options else 0
+        slot["part"] = st.selectbox(
+            "Section",
+            options=part_options,
+            index=part_idx,
+            key=f"slot_part_{j}",
+            label_visibility="collapsed",
+        )
+
+    with col_id:
+        slot["id"] = st.text_input(
+            "Q.No",
+            value=str(slot.get("id", f"{j+1}")),
+            key=f"slot_id_{j}",
+            label_visibility="collapsed",
+            placeholder="e.g. 1(a)",
+        )
 
     with col_co:
-        sel_co = st.selectbox(
-            "Course Outcome",
+        co_val = slot.get("co", available_cos[0])
+        co_index = available_cos.index(co_val) if co_val in available_cos else 0
+        slot["co"] = st.selectbox(
+            "Outcome",
             options=available_cos,
             index=co_index,
             key=f"slot_co_{j}",
-            label_visibility="collapsed" if j > 0 else "visible",
+            label_visibility="collapsed",
         )
-        slot["co"] = sel_co
 
     with col_bt:
         current_lvl = slot.get("level", "L1")
         lvl_index = bt_options.index(current_lvl) if current_lvl in bt_options else 0
-        sel_bt = st.selectbox(
+        slot["level"] = st.selectbox(
             "Bloom's Level",
             options=bt_options,
             format_func=lambda x: bt_labels.get(x, x),
             index=lvl_index,
             key=f"slot_bt_{j}",
-            label_visibility="collapsed" if j > 0 else "visible",
+            label_visibility="collapsed",
         )
-        slot["level"] = sel_bt
 
     with col_marks:
-        sel_marks = st.number_input(
-            "Marks",
-            min_value=1,
-            max_value=100,
-            value=int(slot.get("marks", 5)),
-            step=1,
-            key=f"slot_marks_{j}",
-            label_visibility="collapsed" if j > 0 else "visible",
+        slot["marks"] = int(
+            st.number_input(
+                "Marks",
+                min_value=1,
+                max_value=50,
+                value=int(slot.get("marks", 2)),
+                step=1,
+                key=f"slot_marks_{j}",
+                label_visibility="collapsed",
+            )
         )
-        slot["marks"] = int(sel_marks)
 
     with col_del_slot:
-        if j == 0:
-            st.caption("Action")
         if st.button("🗑️", key=f"del_slot_{j}", help="Delete question slot"):
             slots_to_remove.append(j)
 
@@ -312,10 +439,12 @@ if slots_to_remove:
 
 col_add_q, _ = st.columns([2, 5])
 with col_add_q:
-    if st.button("➕ Add question", key="btn_add_slot"):
+    if st.button("➕ Add question slot", key="btn_add_slot"):
         st.session_state.slots.append({
+            "part": "Part B",
+            "id": f"{len(st.session_state.slots) + 1}(a)",
             "co": available_cos[0],
-            "level": "L1",
+            "level": "L3",
             "marks": 5,
         })
         st.rerun()
@@ -333,12 +462,11 @@ uploaded_pdf = st.file_uploader(
     help="Upload the reference textbook or course material in PDF format.",
 )
 
-col_gen, _ = st.columns([2, 5])
+col_gen, _ = st.columns([2.5, 4.5])
 with col_gen:
     generate_clicked = st.button("🚀 Generate Question Paper", type="primary", use_container_width=True)
 
 if generate_clicked:
-    # Form Validation
     if not uploaded_pdf:
         st.error("Please upload a textbook PDF before generating.")
     elif not st.session_state.outcomes or not any(o["desc"].strip() for o in st.session_state.outcomes):
@@ -361,7 +489,6 @@ if generate_clicked:
                 for o in st.session_state.outcomes
                 if o["code"].strip()
             }
-            # Convert to tuple of tuples for cache hashing
             outcomes_tuple = tuple(sorted(outcomes_dict.items()))
             scored_chunks = get_cached_scored_chunks(chunks, outcomes_tuple)
             status_box.write(f"✓ Computed semantic embeddings for {len(outcomes_dict)} outcome(s).")
@@ -394,7 +521,7 @@ if generate_clicked:
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
 # -----------------------------------------------------------------------------
-# Section 4: Results Display & Download
+# Section 4: Results Display & Export (Vikas Step 2 & 3)
 # -----------------------------------------------------------------------------
 if st.session_state.results:
     res = st.session_state.results
@@ -403,7 +530,6 @@ if st.session_state.results:
 
     st.subheader("📋 Generated Question Paper")
 
-    # Unfilled slots warning
     if unfilled:
         unfilled_details = ", ".join(
             f"{u.get('co')} ({u.get('level')}, {u.get('marks')} marks)" for u in unfilled
@@ -414,13 +540,15 @@ if st.session_state.results:
         )
 
     if questions:
+        # Table data matching: (S.No, Question, Marks, BT, CO)
         table_data = [
             {
-                "id": q["id"],
-                "question": q["question"],
-                "BT level": q["level"],
-                "CO": q["co"],
-                "marks": q["marks"],
+                "Part": q.get("part", "General"),
+                "S.No": q.get("id", ""),
+                "Question": q.get("question", ""),
+                "Marks": q.get("marks", ""),
+                "BT": q.get("level", ""),
+                "CO": q.get("co", ""),
             }
             for q in questions
         ]
@@ -429,18 +557,19 @@ if st.session_state.results:
         st.dataframe(
             df,
             column_config={
-                "id": st.column_config.TextColumn("ID", width="small"),
-                "question": st.column_config.TextColumn("Question", width="large"),
-                "BT level": st.column_config.TextColumn("BT Level", width="small"),
-                "CO": st.column_config.TextColumn("Outcome", width="small"),
-                "marks": st.column_config.NumberColumn("Marks", width="small"),
+                "Part": st.column_config.TextColumn("Section", width="small"),
+                "S.No": st.column_config.TextColumn("S.No", width="small"),
+                "Question": st.column_config.TextColumn("Question Text", width="large"),
+                "Marks": st.column_config.NumberColumn("Marks", width="small"),
+                "BT": st.column_config.TextColumn("BT Level", width="small"),
+                "CO": st.column_config.TextColumn("Course Outcome", width="small"),
             },
             hide_index=True,
             use_container_width=True,
         )
 
-        # Export Buttons (DOCX and PDF)
-        st.write("#### 📥 Export Question Paper")
+        # Export Section
+        st.write("#### 📥 Export Formatted Question Paper")
         course_title = getattr(st.session_state, "course_title", "Course Examination")
         outcomes_map = {
             o["code"].strip(): o["desc"].strip()
@@ -451,37 +580,39 @@ if st.session_state.results:
         docx_data = create_docx_exam_paper(
             questions=questions,
             course_name=course_title,
-            subject_code="CO-RAG",
+            subject_code=st.session_state.subject_code,
             outcomes=outcomes_map,
+            institution_name=st.session_state.institution_name,
         )
         pdf_data = create_pdf_exam_paper(
             questions=questions,
             course_name=course_title,
-            subject_code="CO-RAG",
+            subject_code=st.session_state.subject_code,
             outcomes=outcomes_map,
+            institution_name=st.session_state.institution_name,
         )
 
-        col_docx, col_pdf, _ = st.columns([2, 2, 3])
+        col_docx, col_pdf, _ = st.columns([2.5, 2.5, 2])
         with col_docx:
             st.download_button(
-                label="📄 Download as DOCX",
+                label="📄 Download as Word (.docx)",
                 data=docx_data,
-                file_name="question_paper.docx",
+                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
                 use_container_width=True,
             )
         with col_pdf:
             st.download_button(
-                label="📑 Download as PDF",
+                label="📑 Download as PDF (.pdf)",
                 data=pdf_data,
-                file_name="question_paper.pdf",
+                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.pdf",
                 mime="application/pdf",
                 type="primary",
                 use_container_width=True,
             )
 
-        with st.expander("🔍 View Technical Question Metadata"):
+        with st.expander("🔍 View Technical Question Metadata & Evaluation Details"):
             st.json(questions)
     else:
         st.error("No questions could be generated. Please check your uploaded PDF and outcomes.")
