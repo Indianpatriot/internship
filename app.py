@@ -1,12 +1,7 @@
 """Streamlit UI for Outcome-Aware Question Paper Generation.
 
 Zero-cost, local RAG question paper generation mapped to Course Outcomes (CO/LO)
-and Bloom's Taxonomy (BT) levels.
-
-Vikas Deliverables:
-- Step 1: 50-Mark Blueprint structure (Part A: 10m, Part B: 40m with a/b subparts).
-- Step 2: Table layout (S.No, Question, Marks, BT, CO) matching standard exam papers.
-- Step 3: Streamlit UI with 1-click blueprint presets, live BT/CO analytics, and DOCX/PDF export.
+and Bloom's Taxonomy (BT) levels with Chapter Selection and Paper Assembly.
 """
 import os
 import re
@@ -19,6 +14,11 @@ from blueprint import (
     get_50_mark_blueprint,
     get_25_mark_blueprint,
     calculate_blueprint_stats,
+)
+from chapter_filter import (
+    filter_chunks,
+    get_chapter_metadata,
+    get_filter_summary,
 )
 from export_utils import create_docx_exam_paper, create_pdf_exam_paper
 from generation.mock_client import MockClient
@@ -78,15 +78,6 @@ st.markdown(
         background: #fffbeb;
         border-color: #fde68a;
         color: #92400e;
-    }
-    .part-banner {
-        font-weight: 700;
-        background: #e2e8f0;
-        color: #1e3a8a;
-        padding: 0.3rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.9rem;
-        display: inline-block;
     }
     </style>
     """,
@@ -206,7 +197,7 @@ with st.sidebar:
         - **Model:** `BAAI/bge-small-en-v1.5`
         - **Embedding Mode:** Normalized Cosine Similarity
         - **Bloom's Levels:** L1 to L5
-        - **Vikas Role:** Blueprint, Paper Assembly & DOCX Export
+        - **Features:** 50-Mark Blueprint, Chapter Filtering & Verification
         """
     )
 
@@ -216,7 +207,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 st.markdown('<div class="main-title">Outcome-Aware Question Paper Generator</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Upload a textbook PDF, define custom Course/Learning Outcomes (CO/LO), '
+    '<div class="subtitle">Upload a textbook PDF, select specific chapters, define Course Outcomes (CO/LO), '
     'and generate a balanced 50-mark exam paper mapped to Bloom\'s Taxonomy.</div>',
     unsafe_allow_html=True,
 )
@@ -282,12 +273,10 @@ st.caption(
     "Select a preset below or customize individual question slots."
 )
 
-# Extract current outcome codes
 available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
 if not available_cos:
     available_cos = ["CO1"]
 
-# Blueprint Preset Loader Buttons
 col_p1, col_p2, col_p3 = st.columns([2.5, 2.5, 2])
 with col_p1:
     if st.button("🎓 Load 50-Mark Blueprint (Standard)", use_container_width=True):
@@ -452,9 +441,9 @@ with col_add_q:
 st.divider()
 
 # -----------------------------------------------------------------------------
-# Section 3: File Upload & Generation Execution
+# Section 3: File Upload & Chapter Selection (Task Steps 1, 2, 3, 4)
 # -----------------------------------------------------------------------------
-st.subheader("3. Document Ingestion & Generation")
+st.subheader("3. Document Ingestion & Chapter Selection")
 
 uploaded_pdf = st.file_uploader(
     "Upload Textbook PDF",
@@ -462,9 +451,135 @@ uploaded_pdf = st.file_uploader(
     help="Upload the reference textbook or course material in PDF format.",
 )
 
+filtered_chunks = []
+selected_chapters = []
+selected_sections = None
+page_range = None
+can_generate = False
+
+if uploaded_pdf:
+    # Substep 1.1: Run ingestion immediately upon upload and cache
+    file_bytes = uploaded_pdf.getvalue()
+    raw_chunks = get_cached_chunks(file_bytes, uploaded_pdf.name)
+    st.session_state.course_title = os.path.splitext(uploaded_pdf.name)[0].replace("-", " ").replace("_", " ").title()
+
+    # Substep 1.2: Build chapter metadata in book order (by page_start)
+    chapter_metadata = get_chapter_metadata(raw_chunks)
+
+    if chapter_metadata:
+        all_chapter_names = [m["chapter"] for m in chapter_metadata]
+        chap_display_map = {m["chapter"]: m["display_label"] for m in chapter_metadata}
+        chap_sections_map = {m["chapter"]: m["sections"] for m in chapter_metadata}
+
+        # Initialize session state for selected chapters
+        if "selected_chapters" not in st.session_state:
+            st.session_state.selected_chapters = list(all_chapter_names)
+
+        # Validate against current PDF chapters
+        valid_selected = [c for c in st.session_state.selected_chapters if c in all_chapter_names]
+        if not valid_selected and all_chapter_names and "chapter_cleared" not in st.session_state:
+            valid_selected = list(all_chapter_names)
+            st.session_state.selected_chapters = valid_selected
+
+        st.markdown("##### 📖 Select Chapters for Question Paper")
+        st.caption("Every question will be generated strictly from your selected chapters. Other chapters will be ignored.")
+
+        # Substep 2.2: Select all and Clear buttons
+        btn_c1, btn_c2, _ = st.columns([1.5, 1.5, 5])
+        with btn_c1:
+            if st.button("✓ Select all", use_container_width=True):
+                st.session_state.selected_chapters = list(all_chapter_names)
+                if "chapter_cleared" in st.session_state:
+                    del st.session_state.chapter_cleared
+                st.rerun()
+        with btn_c2:
+            if st.button("✕ Clear", use_container_width=True):
+                st.session_state.selected_chapters = []
+                st.session_state.chapter_cleared = True
+                st.rerun()
+
+        # Substep 2.1: st.multiselect with all chapters selected by default
+        selected_chapters = st.multiselect(
+            "Choose Chapters",
+            options=all_chapter_names,
+            default=st.session_state.selected_chapters,
+            format_func=lambda x: chap_display_map.get(x, x),
+            key="chapter_multiselect",
+        )
+        st.session_state.selected_chapters = selected_chapters
+
+        # Substep 2.3: Optional section narrowing
+        if selected_chapters:
+            all_available_secs = []
+            for ch in selected_chapters:
+                all_available_secs.extend(chap_sections_map.get(ch, []))
+            all_available_secs = sorted(list(set(all_available_secs)))
+
+            if all_available_secs:
+                with st.expander("🔍 Filter by Specific Sections (Optional)", expanded=False):
+                    selected_sections = st.multiselect(
+                        "Include sections:",
+                        options=all_available_secs,
+                        default=all_available_secs,
+                        help="Uncheck any sections you wish to exclude from the paper.",
+                    )
+
+        # Substep 3.1 & 3.2: Filter chunks BEFORE outcome scoring
+        filtered_chunks = filter_chunks(
+            raw_chunks,
+            selected_chapters=selected_chapters,
+            selected_sections=selected_sections,
+        )
+
+        # Substep 2.4: Live summary
+        if selected_chapters:
+            st.info(f"ℹ️ {get_filter_summary(filtered_chunks, selected_chapters)}")
+            can_generate = len(filtered_chunks) > 0
+        else:
+            # Step 4 Edge case: No chapter selected
+            st.error("⚠️ **Select at least one chapter** to enable question paper generation.")
+            can_generate = False
+
+    else:
+        # Step 4 Edge case: Chapter detection found nothing
+        st.warning("⚠️ No chapter headings detected in document TOC. Falling back to page range selection.")
+        all_pages = [c.get("page_start", 1) for c in raw_chunks] + [c.get("page_end", 1) for c in raw_chunks]
+        min_p = min(all_pages) if all_pages else 1
+        max_p = max(all_pages) if all_pages else min_p
+
+        p_col1, p_col2 = st.columns(2)
+        with p_col1:
+            from_page = st.number_input("From Page", min_value=1, max_value=max_p, value=min_p, step=1)
+        with p_col2:
+            to_page = st.number_input("To Page", min_value=int(from_page), max_value=max_p, value=max_p, step=1)
+
+        page_range = (int(from_page), int(to_page))
+        filtered_chunks = filter_chunks(raw_chunks, page_range=page_range)
+        st.info(f"ℹ️ Selected pages {from_page}–{to_page} ({len(filtered_chunks)} chunks).")
+        can_generate = len(filtered_chunks) > 0
+
+    # Step 4 Edge case: Selection is too small
+    usable_chunks = [
+        c for c in filtered_chunks
+        if c.get("word_count", len(c.get("text", "").split())) >= config.MIN_CONTEXT_WORDS
+    ]
+    needed_questions = len(st.session_state.slots)
+    if filtered_chunks and len(usable_chunks) < needed_questions:
+        st.warning(
+            f"⚠️ **Selection is small**: Selected filter has only {len(usable_chunks)} usable text chunk(s) "
+            f"(with ≥{config.MIN_CONTEXT_WORDS} words), but the blueprint requires {needed_questions} questions. "
+            f"Some questions might be duplicated or left unfilled."
+        )
+
 col_gen, _ = st.columns([2.5, 4.5])
 with col_gen:
-    generate_clicked = st.button("🚀 Generate Question Paper", type="primary", use_container_width=True)
+    generate_clicked = st.button(
+        "🚀 Generate Question Paper",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_generate,
+        help="Select at least one chapter to enable." if not can_generate else "Generate exam questions",
+    )
 
 if generate_clicked:
     if not uploaded_pdf:
@@ -473,25 +588,23 @@ if generate_clicked:
         st.error("Please provide at least one Course Outcome with a description.")
     elif not st.session_state.slots:
         st.error("Please add at least one question slot in the blueprint.")
+    elif not filtered_chunks:
+        st.error("No text chunks match your chapter/section selection.")
     else:
         with st.status("Executing Generation Pipeline...", expanded=True) as status_box:
-            # 1. Ingest PDF
-            status_box.write("📄 Ingesting and chunking PDF document...")
-            file_bytes = uploaded_pdf.getvalue()
-            chunks = get_cached_chunks(file_bytes, uploaded_pdf.name)
-            st.session_state.course_title = os.path.splitext(uploaded_pdf.name)[0].replace("-", " ").replace("_", " ").title()
-            status_box.write(f"✓ Ingested {len(chunks)} chunks from `{uploaded_pdf.name}`.")
+            # Substep 3.2 & 3.3: Ingest -> Filter by Chapter -> Score Outcomes -> Generate
+            status_box.write(f"📄 Filtered to {len(filtered_chunks)} chunk(s) from selected chapter(s)...")
 
-            # 2. Embedding & Scoring
-            status_box.write("🧠 Scoring chunks against course outcomes...")
+            # 2. Embedding & Scoring ONLY on filtered chunks
+            status_box.write("🧠 Scoring filtered chunks against course outcomes...")
             outcomes_dict = {
                 o["code"].strip(): o["desc"].strip()
                 for o in st.session_state.outcomes
                 if o["code"].strip()
             }
             outcomes_tuple = tuple(sorted(outcomes_dict.items()))
-            scored_chunks = get_cached_scored_chunks(chunks, outcomes_tuple)
-            status_box.write(f"✓ Computed semantic embeddings for {len(outcomes_dict)} outcome(s).")
+            scored_chunks = get_cached_scored_chunks(filtered_chunks, outcomes_tuple)
+            status_box.write(f"✓ Computed semantic embeddings for {len(outcomes_dict)} outcome(s) across selected chapters.")
 
             # 3. Client initialization
             if use_mock:
@@ -517,38 +630,49 @@ if generate_clicked:
                 on_progress=on_progress_callback,
             )
             progress_bar.progress(1.0)
+            results["covered_chapters"] = selected_chapters
             st.session_state.results = results
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
 # -----------------------------------------------------------------------------
-# Section 4: Results Display & Export (Vikas Step 2 & 3)
+# Section 4: Results Display & Export (Step 5)
 # -----------------------------------------------------------------------------
 if st.session_state.results:
     res = st.session_state.results
     questions = res.get("questions", [])
     unfilled = res.get("unfilled", [])
+    covered_chaps = res.get("covered_chapters", selected_chapters)
 
     st.subheader("📋 Generated Question Paper")
 
+    # Substep 5.1: Results header with selected chapters
+    if covered_chaps:
+        st.markdown(f"**Generated from Chapters:** `{', '.join(covered_chaps)}`")
+
+    # Step 4: Unfilled slots with CO coverage note
     if unfilled:
         unfilled_details = ", ".join(
             f"{u.get('co')} ({u.get('level')}, {u.get('marks')} marks)" for u in unfilled
         )
         st.warning(
             f"⚠️ Could not find suitable text or valid questions for {len(unfilled)} slot(s): "
-            f"**{unfilled_details}**."
+            f"**{unfilled_details}**.<br/>"
+            f"💡 *Note: These Course Outcomes (COs) might belong to textbook chapters that were excluded in your chapter selection.*",
+            icon="⚠️",
         )
 
     if questions:
-        # Table data matching: (S.No, Question, Marks, BT, CO)
+        # Substep 5.2: Add source chapter and page as columns for verification
         table_data = [
             {
-                "Part": q.get("part", "General"),
+                "Section": q.get("part", "General"),
                 "S.No": q.get("id", ""),
                 "Question": q.get("question", ""),
                 "Marks": q.get("marks", ""),
-                "BT": q.get("level", ""),
-                "CO": q.get("co", ""),
+                "BT Level": q.get("level", ""),
+                "Outcome": q.get("co", ""),
+                "Source Chapter": q.get("chapter", "N/A"),
+                "Source Page": f"p. {q.get('page_start', '')}" if q.get("page_start") else "N/A",
             }
             for q in questions
         ]
@@ -557,18 +681,20 @@ if st.session_state.results:
         st.dataframe(
             df,
             column_config={
-                "Part": st.column_config.TextColumn("Section", width="small"),
+                "Section": st.column_config.TextColumn("Section", width="small"),
                 "S.No": st.column_config.TextColumn("S.No", width="small"),
                 "Question": st.column_config.TextColumn("Question Text", width="large"),
                 "Marks": st.column_config.NumberColumn("Marks", width="small"),
-                "BT": st.column_config.TextColumn("BT Level", width="small"),
-                "CO": st.column_config.TextColumn("Course Outcome", width="small"),
+                "BT Level": st.column_config.TextColumn("BT Level", width="small"),
+                "Outcome": st.column_config.TextColumn("Course Outcome", width="small"),
+                "Source Chapter": st.column_config.TextColumn("Source Chapter", width="medium"),
+                "Source Page": st.column_config.TextColumn("Page", width="small"),
             },
             hide_index=True,
             use_container_width=True,
         )
 
-        # Export Section
+        # Export Section (DOCX, PDF, CSV)
         st.write("#### 📥 Export Formatted Question Paper")
         course_title = getattr(st.session_state, "course_title", "Course Examination")
         outcomes_map = {
@@ -583,6 +709,8 @@ if st.session_state.results:
             subject_code=st.session_state.subject_code,
             outcomes=outcomes_map,
             institution_name=st.session_state.institution_name,
+            covered_chapters=covered_chaps,
+            include_source=True,
         )
         pdf_data = create_pdf_exam_paper(
             questions=questions,
@@ -590,9 +718,12 @@ if st.session_state.results:
             subject_code=st.session_state.subject_code,
             outcomes=outcomes_map,
             institution_name=st.session_state.institution_name,
+            covered_chapters=covered_chaps,
+            include_source=True,
         )
+        csv_data = df.to_csv(index=False).encode("utf-8")
 
-        col_docx, col_pdf, _ = st.columns([2.5, 2.5, 2])
+        col_docx, col_pdf, col_csv = st.columns([2.5, 2.5, 2])
         with col_docx:
             st.download_button(
                 label="📄 Download as Word (.docx)",
@@ -611,8 +742,16 @@ if st.session_state.results:
                 type="primary",
                 use_container_width=True,
             )
+        with col_csv:
+            st.download_button(
+                label="📊 Download as CSV (.csv)",
+                data=csv_data,
+                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
         with st.expander("🔍 View Technical Question Metadata & Evaluation Details"):
             st.json(questions)
     else:
-        st.error("No questions could be generated. Please check your uploaded PDF and outcomes.")
+        st.error("No questions could be generated. Please check your uploaded PDF, chapter selection, and outcomes.")

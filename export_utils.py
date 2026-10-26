@@ -1,9 +1,9 @@
 """Export utilities for generating professional DOCX and PDF question papers.
 
-Implements Step 2 of Paper Assembly:
-- Exact table layout: (S.No, Question, Marks, BT, CO)
-- Grouping by sections/parts (Part A: 10 Marks, Part B: 40 Marks)
-- Academic header formatting (University/Course, Duration, Max Marks)
+Implements Paper Assembly & Export:
+- Table layout: (S.No, Question, Marks, BT, CO, Source)
+- Section grouping (Part A: 10 Marks, Part B: 40 Marks)
+- Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
 - Bloom's Taxonomy & Course Outcome reference tables
 """
 import io
@@ -26,10 +26,12 @@ def create_docx_exam_paper(
     subject_code: str = "EXAM-101",
     outcomes: dict[str, str] = None,
     institution_name: str = "EXAMINATION QUESTION PAPER",
+    covered_chapters: list[str] = None,
+    include_source: bool = True,
 ) -> bytes:
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
-    Produces table layout: (S.No, Question, Marks, BT, CO) with section grouping.
+    Produces table layout: (S.No, Question, Marks, BT, CO, [Source]) with section grouping.
     """
     doc = docx.Document()
 
@@ -51,6 +53,14 @@ def create_docx_exam_paper(
     sub_run = title_p.add_run(f"Subject: {course_name} ({subject_code})")
     sub_run.bold = True
     sub_run.font.size = Pt(11)
+
+    if covered_chapters:
+        ch_p = doc.add_paragraph()
+        ch_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {', '.join(covered_chapters)}")
+        ch_run.font.size = Pt(9.5)
+        ch_run.font.italic = True
+        ch_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
 
     total_marks = sum(int(q.get("marks", 0)) for q in questions)
     time_str = "1.5 Hours" if total_marks <= 30 else ("2 Hours" if total_marks <= 50 else "3 Hours")
@@ -93,18 +103,24 @@ def create_docx_exam_paper(
 
     doc.add_paragraph("")
 
-    # 3. Main Question Table: (S.No, Question, Marks, BT, CO)
-    q_table = doc.add_table(rows=1, cols=5)
+    # 3. Main Question Table
+    has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
+    if has_source:
+        headers = ["S.No", "Question Text", "Marks", "BT", "CO", "Source"]
+        t_widths = [Inches(0.65), Inches(3.6), Inches(0.6), Inches(0.6), Inches(0.6), Inches(0.9)]
+    else:
+        headers = ["S.No", "Question Text", "Marks", "BT", "CO"]
+        t_widths = [Inches(0.75), Inches(4.1), Inches(0.7), Inches(0.7), Inches(0.7)]
+
+    num_cols = len(headers)
+    q_table = doc.add_table(rows=1, cols=num_cols)
     q_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     q_table.autofit = False
 
-    # Widths: S.No (0.75"), Question (4.1"), Marks (0.7"), BT (0.7"), CO (0.7") => Total = 6.95"
-    t_widths = [Inches(0.75), Inches(4.1), Inches(0.7), Inches(0.7), Inches(0.7)]
     for cell, w in zip(q_table.rows[0].cells, t_widths):
         cell.width = w
 
     hdr_cells = q_table.rows[0].cells
-    headers = ["S.No", "Question Text", "Marks", "BT", "CO"]
     for i, title in enumerate(headers):
         hdr_cells[i].text = title
         p = hdr_cells[i].paragraphs[0]
@@ -146,7 +162,6 @@ def create_docx_exam_paper(
             shading = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
             merged_cell._tc.get_or_add_tcPr().append(shading)
 
-        # Standard question row: S.No, Question, Marks, BT, CO
         row_cells = q_table.add_row().cells
         for cell, w in zip(row_cells, t_widths):
             cell.width = w
@@ -164,6 +179,14 @@ def create_docx_exam_paper(
 
         row_cells[4].text = str(q.get("co", ""))
         row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        if has_source:
+            ch = q.get("chapter", "")
+            p_s = q.get("page_start", "")
+            p_str = f"p.{p_s}" if p_s else ""
+            src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
+            row_cells[5].text = src_str
+            row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         for cell in row_cells:
             for p in cell.paragraphs:
@@ -198,6 +221,8 @@ def create_pdf_exam_paper(
     subject_code: str = "EXAM-101",
     outcomes: dict[str, str] = None,
     institution_name: str = "EXAMINATION QUESTION PAPER",
+    covered_chapters: list[str] = None,
+    include_source: bool = True,
 ) -> bytes:
     """Generate a formatted PDF exam question paper using ReportLab."""
     buf = io.BytesIO()
@@ -228,6 +253,15 @@ def create_pdf_exam_paper(
         alignment=1,
         textColor=colors.HexColor("#334155"),
         fontName="Helvetica-Bold",
+    )
+    ch_style = ParagraphStyle(
+        "ExamChapters",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+        alignment=1,
+        textColor=colors.HexColor("#475569"),
+        fontName="Helvetica-Oblique",
     )
     q_cell_style = ParagraphStyle(
         "QuestionCell",
@@ -264,6 +298,8 @@ def create_pdf_exam_paper(
     elements = []
     elements.append(Paragraph(institution_name.upper(), title_style))
     elements.append(Paragraph(f"Subject: {course_name} ({subject_code})", sub_style))
+    if covered_chapters:
+        elements.append(Paragraph(f"Syllabus / Covered Chapters: {', '.join(covered_chapters)}", ch_style))
     elements.append(Spacer(1, 8))
 
     total_marks = sum(int(q.get("marks", 0)) for q in questions)
@@ -302,14 +338,26 @@ def create_pdf_exam_paper(
     )
     elements.append(Spacer(1, 10))
 
-    # Questions Table: S.No, Question, Marks, BT, CO
-    table_data = [[
-        Paragraph("S.No", hdr_style),
-        Paragraph("Question Text", hdr_style),
-        Paragraph("Marks", hdr_style),
-        Paragraph("BT", hdr_style),
-        Paragraph("CO", hdr_style),
-    ]]
+    has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
+    if has_source:
+        table_data = [[
+            Paragraph("S.No", hdr_style),
+            Paragraph("Question Text", hdr_style),
+            Paragraph("Marks", hdr_style),
+            Paragraph("BT", hdr_style),
+            Paragraph("CO", hdr_style),
+            Paragraph("Source", hdr_style),
+        ]]
+        col_widths = [40, 260, 45, 45, 45, 85]
+    else:
+        table_data = [[
+            Paragraph("S.No", hdr_style),
+            Paragraph("Question Text", hdr_style),
+            Paragraph("Marks", hdr_style),
+            Paragraph("BT", hdr_style),
+            Paragraph("CO", hdr_style),
+        ]]
+        col_widths = [45, 335, 45, 45, 50]
 
     has_parts = any("part" in q for q in questions)
     current_part = None
@@ -324,18 +372,27 @@ def create_pdf_exam_paper(
 
             row_idx = len(table_data)
             part_rows_indices.append(row_idx)
+            empty_cells = [""] * (len(col_widths) - 1)
             table_data.append([
                 Paragraph(f"{current_part.upper()} — ({part_m} Marks)", part_style),
-                "", "", "", "",
+                *empty_cells,
             ])
 
-        table_data.append([
+        row = [
             Paragraph(str(q.get("id", "")), q_bold_cell),
             Paragraph(str(q.get("question", "")), q_cell_style),
             Paragraph(f"[{q.get('marks', '')}]", q_bold_cell),
             Paragraph(str(q.get("level", "")), q_bold_cell),
             Paragraph(str(q.get("co", "")), q_bold_cell),
-        ])
+        ]
+        if has_source:
+            ch = q.get("chapter", "")
+            p_s = q.get("page_start", "")
+            p_str = f"p.{p_s}" if p_s else ""
+            src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
+            row.append(Paragraph(src_str, q_cell_style))
+
+        table_data.append(row)
 
     t_style = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
@@ -352,7 +409,7 @@ def create_pdf_exam_paper(
         t_style.append(("SPAN", (0, p_idx), (-1, p_idx)))
         t_style.append(("BACKGROUND", (0, p_idx), (-1, p_idx), colors.HexColor("#F1F5F9")))
 
-    q_table = Table(table_data, colWidths=[45, 335, 45, 45, 50])
+    q_table = Table(table_data, colWidths=col_widths)
     q_table.setStyle(TableStyle(t_style))
     elements.append(q_table)
 
