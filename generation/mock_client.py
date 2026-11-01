@@ -59,17 +59,17 @@ def _format_question_with_verb(verb: str, concept: str) -> str:
         return f"{V} how {concept} operates within the system?"
     elif v in {"classify", "categorize", "distinguish", "differentiate"}:
         return f"{V} the various categories and approaches associated with {concept}?"
-    elif v in {"apply", "demonstrate", "illustrate", "implement", "execute"}:
-        return f"{V} the core principles of {concept} to solve practical problems?"
+    elif v in {"apply", "demonstrate", "illustrate", "implement", "execute", "respond", "provide", "use"}:
+        return f"{V} practical solutions and implementations involving {concept}?"
     elif v in {"solve", "calculate", "compute", "determine"}:
         return f"{V} analytical problems involving {concept} using standard methodologies?"
-    elif v in {"analyze", "deconstruct", "examine", "investigate"}:
+    elif v in {"analyze", "deconstruct", "examine", "investigate", "integrate"}:
         return f"{V} the structural behavior, parameters, and trade-offs of {concept}?"
     elif v in {"compare", "contrast"}:
         return f"{V} the operational advantages and distinctions within {concept}?"
-    elif v in {"evaluate", "assess", "justify", "critique", "appraise"}:
+    elif v in {"evaluate", "assess", "justify", "critique", "appraise", "check", "reflect", "judge"}:
         return f"{V} the performance, efficiency, and practical limitations of {concept}?"
-    elif v in {"design", "formulate", "construct", "propose", "develop"}:
+    elif v in {"design", "formulate", "construct", "propose", "develop", "generate", "assemble", "create"}:
         return f"{V} an effective framework utilizing {concept}?"
     else:
         return f"{V} the underlying mechanisms and significance of {concept}?"

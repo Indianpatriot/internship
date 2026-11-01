@@ -2,6 +2,7 @@
 import random
 import re
 
+from blooms.revised_taxonomy import normalize_knowledge_dimension
 from blooms.verb_bank import first_word, normalize_level, sample_verbs, validate_question
 from config import MAX_CONTEXT_WORDS, MIN_CONTEXT_WORDS
 from generation.prompts import build_prompt
@@ -32,25 +33,44 @@ def is_duplicate(q, seen, threshold=0.8):
     return any(_jaccard(q, s) >= threshold for s in seen)
 
 
-def generate_question(chunk, level, client, rng=None, max_retries=3, marks=None, k_verbs=4):
+def generate_question(
+    chunk,
+    level,
+    client,
+    rng=None,
+    max_retries=3,
+    marks=None,
+    k_verbs=4,
+    knowledge_dimension=None,
+):
     level = normalize_level(level)
     rng = rng or random.Random()
+    kd = normalize_knowledge_dimension(knowledge_dimension) if knowledge_dimension else None
     context = " ".join(chunk["text"].split()[:MAX_CONTEXT_WORDS])
     q, reason, attempts = "", "no output", 0
     ok = False
     for attempts in range(1, max_retries + 1):
         verbs = sample_verbs(level, k_verbs, rng)
-        prompt = build_prompt(context, level, verbs, marks)
+        prompt = build_prompt(context, level, verbs, marks=marks, knowledge_dimension=kd)
         raw = client.generate(prompt, temperature=min(0.3 + 0.2 * (attempts - 1), 0.9))
         q = clean_output(raw)
         ok, reason = validate_question(q, level)
         if ok:
             break
     return {
-        "question": q, "level": level, "verb": first_word(q), "marks": marks,
-        "valid": ok, "reason": reason, "attempts": attempts,
-        "chunk_id": chunk.get("chunk_id"), "chapter": chunk.get("chapter"),
-        "section": chunk.get("section"), "page_start": chunk.get("page_start"),
+        "question": q,
+        "level": level,
+        "verb": first_word(q),
+        "marks": marks,
+        "knowledge_dimension": kd or "Conceptual",
+        "kd": kd or "Conceptual",
+        "valid": ok,
+        "reason": reason,
+        "attempts": attempts,
+        "chunk_id": chunk.get("chunk_id"),
+        "chapter": chunk.get("chapter"),
+        "section": chunk.get("section"),
+        "page_start": chunk.get("page_start"),
         "page_end": chunk.get("page_end"),
     }
 
@@ -82,7 +102,7 @@ def generate_paper(chunks, level_counts, client, seed=None, marks=None, on_progr
 
 
 def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
-    """slots: [{'co': 'CO1', 'level': 'L1', 'marks': 5, 'part': 'Part A', 'id': '1(a)'}, ...]"""
+    """slots: [{'co': 'CO1', 'level': 'L1', 'marks': 5, 'part': 'Part A', 'id': '1(a)', 'knowledge_dimension': 'Factual'}, ...]"""
     rng = random.Random(seed)
     usable = [c for c in chunks
               if c.get("word_count", len(c["text"].split())) >= MIN_CONTEXT_WORDS]
@@ -94,8 +114,16 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
             reverse=True,
         )[:10]
         rng.shuffle(pool)
+        slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
         for chunk in pool * 2:
-            rec = generate_question(chunk, slot["level"], client, rng, marks=slot.get("marks"))
+            rec = generate_question(
+                chunk,
+                slot["level"],
+                client,
+                rng,
+                marks=slot.get("marks"),
+                knowledge_dimension=slot_kd,
+            )
             if not rec["valid"] or is_duplicate(rec["question"], seen):
                 rejected.append(rec)
                 continue
@@ -103,6 +131,8 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None):
             rec["id"] = slot.get("id") or slot.get("label") or f"Q{len(questions) + 1:03d}"
             if "part" in slot:
                 rec["part"] = slot["part"]
+            rec["knowledge_dimension"] = slot_kd
+            rec["kd"] = slot_kd
             seen.append(rec["question"])
             questions.append(rec)
             if on_progress:
