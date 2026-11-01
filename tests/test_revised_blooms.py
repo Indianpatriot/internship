@@ -166,3 +166,4 @@ def test_generate_paper_preserves_knowledge_dimension():
     assert q["knowledge_dimension"] == "Factual"
     assert q["kd"] == "Factual"
     assert q["level"] == "L1"
+

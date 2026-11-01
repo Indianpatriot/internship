@@ -253,3 +253,4 @@ def compute_2d_taxonomy_matrix(slots_or_questions: list[dict[str, Any]]) -> dict
             matrix[kd][lvl] += 1
 
     return matrix
+
