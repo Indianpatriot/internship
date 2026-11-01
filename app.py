@@ -1,7 +1,7 @@
 """Streamlit UI for Outcome-Aware Question Paper Generation.
 
 Zero-cost, local RAG question paper generation mapped to Course Outcomes (CO/LO)
-and Bloom's Taxonomy (BT) levels with Chapter Selection and Paper Assembly.
+and Revised Bloom's Taxonomy (Cognitive Process Dimension L1-L6 & Knowledge Dimension).
 """
 import os
 import re
@@ -14,6 +14,12 @@ from blueprint import (
     get_50_mark_blueprint,
     get_25_mark_blueprint,
     calculate_blueprint_stats,
+)
+from blooms.revised_taxonomy import (
+    KNOWLEDGE_DIMENSIONS,
+    COGNITIVE_LEVELS,
+    COGNITIVE_LEVEL_NAMES,
+    normalize_knowledge_dimension,
 )
 from chapter_filter import (
     filter_chunks,
@@ -193,11 +199,13 @@ with st.sidebar:
     st.divider()
     st.markdown(
         """
-        **Pipeline Information:**
+        **Revised Bloom's Taxonomy 2D Framework:**
+        - **Cognitive Process Dimension:**
+          L1 (Remember) → L6 (Create)
+        - **Knowledge Dimension:**
+          Factual, Conceptual, Procedural, Metacognitive
         - **Model:** `BAAI/bge-small-en-v1.5`
-        - **Embedding Mode:** Normalized Cosine Similarity
-        - **Bloom's Levels:** L1 to L5
-        - **Features:** 50-Mark Blueprint, Chapter Filtering & Verification
+        - **Zero API Cost**
         """
     )
 
@@ -207,8 +215,8 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 st.markdown('<div class="main-title">Outcome-Aware Question Paper Generator</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Upload a textbook PDF, select specific chapters, define Course Outcomes (CO/LO), '
-    'and generate a balanced 50-mark exam paper mapped to Bloom\'s Taxonomy.</div>',
+    '<div class="subtitle">Upload a textbook PDF, select chapters, define Course Outcomes (CO/LO), '
+    'and generate a balanced 50-mark exam paper mapped to <b>Revised Bloom\'s Taxonomy</b> (Cognitive & Knowledge dimensions).</div>',
     unsafe_allow_html=True,
 )
 
@@ -265,12 +273,12 @@ with col_btn:
 st.divider()
 
 # -----------------------------------------------------------------------------
-# Section 2: Question Blueprint Slots (Vikas Step 1)
+# Section 2: Question Blueprint Slots (Revised Bloom's Taxonomy 2D)
 # -----------------------------------------------------------------------------
 st.subheader("2. Question Paper Blueprint (Slots)")
 st.caption(
     "Define the 50-mark structure: Part A (Short Questions) and Part B (Long questions with a/b subparts). "
-    "Select a preset below or customize individual question slots."
+    "Map each question across the <b>Cognitive Process Dimension (L1–L6)</b> and <b>Knowledge Dimension (Factual, Conceptual, Procedural, Metacognitive)</b>."
 )
 
 available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
@@ -289,7 +297,14 @@ with col_p2:
 with col_p3:
     if st.button("🔄 Reset to Blank", use_container_width=True):
         st.session_state.slots = [
-            {"part": "Part A", "id": "1", "co": available_cos[0], "level": "L1", "marks": 2}
+            {
+                "part": "Part A",
+                "id": "1",
+                "co": available_cos[0],
+                "level": "L1",
+                "knowledge_dimension": "Factual",
+                "marks": 2,
+            }
         ]
         st.rerun()
 
@@ -314,35 +329,47 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Bloom's & CO Spread Badges
-with st.expander("📊 View Bloom's Taxonomy & Course Outcome Spread", expanded=False):
-    col_bt_dist, col_co_dist = st.columns(2)
+# Bloom's 2D Spread & Analytics
+with st.expander("📊 View Revised Bloom's Taxonomy 2D Matrix & Spread", expanded=False):
+    col_bt_dist, col_kd_dist = st.columns(2)
     with col_bt_dist:
-        st.markdown("**Bloom's Level Distribution:**")
+        st.markdown("**1. Cognitive Process Dimension (L1 to L6):**")
         bt_spread_str = " | ".join(
-            f"**{lvl}**: {marks}m ({stats['bt_percent'].get(lvl, 0)}%)"
+            f"**{lvl} ({COGNITIVE_LEVEL_NAMES.get(lvl, lvl)})**: {marks}m ({stats['bt_percent'].get(lvl, 0)}%)"
             for lvl, marks in sorted(stats["bt_marks"].items())
         )
         st.info(bt_spread_str or "No slots defined")
-    with col_co_dist:
-        st.markdown("**Course Outcome Coverage:**")
-        co_spread_str = " | ".join(
-            f"**{co}**: {marks}m ({stats['co_counts'].get(co, 0)} Qs)"
-            for co, marks in sorted(stats["co_marks"].items())
+    with col_kd_dist:
+        st.markdown("**2. Knowledge Dimension (4 Types):**")
+        kd_spread_str = " | ".join(
+            f"**{kd}**: {marks}m ({stats['kd_percent'].get(kd, 0)}%)"
+            for kd, marks in stats["kd_marks"].items()
         )
-        st.success(co_spread_str or "No slots defined")
+        st.success(kd_spread_str or "No slots defined")
 
-bt_options = ["L1", "L2", "L3", "L4", "L5"]
+    st.markdown("##### 🏛️ Revised Bloom's 2D Taxonomy Matrix (Question Count per Cell)")
+    matrix_data = stats.get("matrix_2d", {})
+    matrix_df = pd.DataFrame(
+        matrix_data
+    ).T[COGNITIVE_LEVELS]
+    matrix_df.columns = [f"{lvl} ({COGNITIVE_LEVEL_NAMES[lvl]})" for lvl in COGNITIVE_LEVELS]
+    st.dataframe(matrix_df, use_container_width=True)
+
+    st.caption("Matches Anderson & Krathwohl's (2001) 4x6 Revised Taxonomy Table.")
+
+bt_options = ["L1", "L2", "L3", "L4", "L5", "L6"]
 bt_labels = {
     "L1": "L1 - Remember",
     "L2": "L2 - Understand",
     "L3": "L3 - Apply",
     "L4": "L4 - Analyze",
     "L5": "L5 - Evaluate",
+    "L6": "L6 - Create",
 }
+kd_options = KNOWLEDGE_DIMENSIONS
 
 # Slots Table Header
-hdr_col1, hdr_col2, hdr_col3, hdr_col4, hdr_col5, hdr_col6 = st.columns([1.5, 1.2, 1.8, 2.2, 1.2, 0.7])
+hdr_col1, hdr_col2, hdr_col3, hdr_col4, hdr_col5, hdr_col6, hdr_col7 = st.columns([1.3, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
 with hdr_col1:
     st.caption("Section / Part")
 with hdr_col2:
@@ -350,15 +377,17 @@ with hdr_col2:
 with hdr_col3:
     st.caption("Outcome (CO)")
 with hdr_col4:
-    st.caption("Bloom Level")
+    st.caption("Cognitive Level (BT)")
 with hdr_col5:
-    st.caption("Marks")
+    st.caption("Knowledge Dim (KD)")
 with hdr_col6:
+    st.caption("Marks")
+with hdr_col7:
     st.caption("Action")
 
 slots_to_remove = []
 for j, slot in enumerate(st.session_state.slots):
-    col_part, col_id, col_co, col_bt, col_marks, col_del_slot = st.columns([1.5, 1.2, 1.8, 2.2, 1.2, 0.7])
+    col_part, col_id, col_co, col_bt, col_kd, col_marks, col_del_slot = st.columns([1.3, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
 
     with col_part:
         part_options = ["Part A", "Part B", "Part C"]
@@ -396,11 +425,22 @@ for j, slot in enumerate(st.session_state.slots):
         current_lvl = slot.get("level", "L1")
         lvl_index = bt_options.index(current_lvl) if current_lvl in bt_options else 0
         slot["level"] = st.selectbox(
-            "Bloom's Level",
+            "Cognitive Level",
             options=bt_options,
             format_func=lambda x: bt_labels.get(x, x),
             index=lvl_index,
             key=f"slot_bt_{j}",
+            label_visibility="collapsed",
+        )
+
+    with col_kd:
+        curr_kd = normalize_knowledge_dimension(slot.get("knowledge_dimension") or slot.get("kd"))
+        kd_index = kd_options.index(curr_kd) if curr_kd in kd_options else 1
+        slot["knowledge_dimension"] = st.selectbox(
+            "Knowledge Dimension",
+            options=kd_options,
+            index=kd_index,
+            key=f"slot_kd_{j}",
             label_visibility="collapsed",
         )
 
@@ -434,6 +474,7 @@ with col_add_q:
             "id": f"{len(st.session_state.slots) + 1}(a)",
             "co": available_cos[0],
             "level": "L3",
+            "knowledge_dimension": "Procedural",
             "marks": 5,
         })
         st.rerun()
@@ -458,12 +499,10 @@ page_range = None
 can_generate = False
 
 if uploaded_pdf:
-    # Substep 1.1: Run ingestion immediately upon upload and cache
     file_bytes = uploaded_pdf.getvalue()
     raw_chunks = get_cached_chunks(file_bytes, uploaded_pdf.name)
     st.session_state.course_title = os.path.splitext(uploaded_pdf.name)[0].replace("-", " ").replace("_", " ").title()
 
-    # Substep 1.2: Build chapter metadata in book order (by page_start)
     chapter_metadata = get_chapter_metadata(raw_chunks)
 
     if chapter_metadata:
@@ -471,11 +510,9 @@ if uploaded_pdf:
         chap_display_map = {m["chapter"]: m["display_label"] for m in chapter_metadata}
         chap_sections_map = {m["chapter"]: m["sections"] for m in chapter_metadata}
 
-        # Initialize session state for selected chapters
         if "selected_chapters" not in st.session_state:
             st.session_state.selected_chapters = list(all_chapter_names)
 
-        # Validate against current PDF chapters
         valid_selected = [c for c in st.session_state.selected_chapters if c in all_chapter_names]
         if not valid_selected and all_chapter_names and "chapter_cleared" not in st.session_state:
             valid_selected = list(all_chapter_names)
@@ -484,7 +521,6 @@ if uploaded_pdf:
         st.markdown("##### 📖 Select Chapters for Question Paper")
         st.caption("Every question will be generated strictly from your selected chapters. Other chapters will be ignored.")
 
-        # Substep 2.2: Select all and Clear buttons
         btn_c1, btn_c2, _ = st.columns([1.5, 1.5, 5])
         with btn_c1:
             if st.button("✓ Select all", use_container_width=True):
@@ -498,7 +534,6 @@ if uploaded_pdf:
                 st.session_state.chapter_cleared = True
                 st.rerun()
 
-        # Substep 2.1: st.multiselect with all chapters selected by default
         selected_chapters = st.multiselect(
             "Choose Chapters",
             options=all_chapter_names,
@@ -508,7 +543,6 @@ if uploaded_pdf:
         )
         st.session_state.selected_chapters = selected_chapters
 
-        # Substep 2.3: Optional section narrowing
         if selected_chapters:
             all_available_secs = []
             for ch in selected_chapters:
@@ -524,24 +558,20 @@ if uploaded_pdf:
                         help="Uncheck any sections you wish to exclude from the paper.",
                     )
 
-        # Substep 3.1 & 3.2: Filter chunks BEFORE outcome scoring
         filtered_chunks = filter_chunks(
             raw_chunks,
             selected_chapters=selected_chapters,
             selected_sections=selected_sections,
         )
 
-        # Substep 2.4: Live summary
         if selected_chapters:
             st.info(f"ℹ️ {get_filter_summary(filtered_chunks, selected_chapters)}")
             can_generate = len(filtered_chunks) > 0
         else:
-            # Step 4 Edge case: No chapter selected
             st.error("⚠️ **Select at least one chapter** to enable question paper generation.")
             can_generate = False
 
     else:
-        # Step 4 Edge case: Chapter detection found nothing
         st.warning("⚠️ No chapter headings detected in document TOC. Falling back to page range selection.")
         all_pages = [c.get("page_start", 1) for c in raw_chunks] + [c.get("page_end", 1) for c in raw_chunks]
         min_p = min(all_pages) if all_pages else 1
@@ -558,7 +588,6 @@ if uploaded_pdf:
         st.info(f"ℹ️ Selected pages {from_page}–{to_page} ({len(filtered_chunks)} chunks).")
         can_generate = len(filtered_chunks) > 0
 
-    # Step 4 Edge case: Selection is too small
     usable_chunks = [
         c for c in filtered_chunks
         if c.get("word_count", len(c.get("text", "").split())) >= config.MIN_CONTEXT_WORDS
@@ -592,7 +621,6 @@ if generate_clicked:
         st.error("No text chunks match your chapter/section selection.")
     else:
         with st.status("Executing Generation Pipeline...", expanded=True) as status_box:
-            # Substep 3.2 & 3.3: Ingest -> Filter by Chapter -> Score Outcomes -> Generate
             status_box.write(f"📄 Filtered to {len(filtered_chunks)} chunk(s) from selected chapter(s)...")
 
             # 2. Embedding & Scoring ONLY on filtered chunks
@@ -612,8 +640,8 @@ if generate_clicked:
             else:
                 client = OllamaClient(model=model_name)
 
-            # 4. Generate by Slots
-            status_box.write("✍️ Generating questions matching blueprint slots...")
+            # 4. Generate by Slots (aligned with Revised Bloom's Taxonomy)
+            status_box.write("✍️ Generating questions matching Revised Bloom's Taxonomy & blueprint slots...")
             progress_bar = st.progress(0.0)
             total_slots = len(st.session_state.slots)
             progress_state = {"count": 0}
@@ -645,14 +673,12 @@ if st.session_state.results:
 
     st.subheader("📋 Generated Question Paper")
 
-    # Substep 5.1: Results header with selected chapters
     if covered_chaps:
         st.markdown(f"**Generated from Chapters:** `{', '.join(covered_chaps)}`")
 
-    # Step 4: Unfilled slots with CO coverage note
     if unfilled:
         unfilled_details = ", ".join(
-            f"{u.get('co')} ({u.get('level')}, {u.get('marks')} marks)" for u in unfilled
+            f"{u.get('co')} ({u.get('level')}, {u.get('knowledge_dimension', 'Conceptual')}, {u.get('marks')}m)" for u in unfilled
         )
         st.warning(
             f"⚠️ Could not find suitable text or valid questions for {len(unfilled)} slot(s): "
@@ -662,14 +688,14 @@ if st.session_state.results:
         )
 
     if questions:
-        # Substep 5.2: Add source chapter and page as columns for verification
         table_data = [
             {
                 "Section": q.get("part", "General"),
                 "S.No": q.get("id", ""),
                 "Question": q.get("question", ""),
                 "Marks": q.get("marks", ""),
-                "BT Level": q.get("level", ""),
+                "BT (Cognitive)": q.get("level", ""),
+                "Knowledge Dim": q.get("knowledge_dimension", "Conceptual"),
                 "Outcome": q.get("co", ""),
                 "Source Chapter": q.get("chapter", "N/A"),
                 "Source Page": f"p. {q.get('page_start', '')}" if q.get("page_start") else "N/A",
@@ -685,7 +711,8 @@ if st.session_state.results:
                 "S.No": st.column_config.TextColumn("S.No", width="small"),
                 "Question": st.column_config.TextColumn("Question Text", width="large"),
                 "Marks": st.column_config.NumberColumn("Marks", width="small"),
-                "BT Level": st.column_config.TextColumn("BT Level", width="small"),
+                "BT (Cognitive)": st.column_config.TextColumn("BT Level", width="small"),
+                "Knowledge Dim": st.column_config.TextColumn("Knowledge (KD)", width="medium"),
                 "Outcome": st.column_config.TextColumn("Course Outcome", width="small"),
                 "Source Chapter": st.column_config.TextColumn("Source Chapter", width="medium"),
                 "Source Page": st.column_config.TextColumn("Page", width="small"),
@@ -711,6 +738,7 @@ if st.session_state.results:
             institution_name=st.session_state.institution_name,
             covered_chapters=covered_chaps,
             include_source=True,
+            include_knowledge_dim=True,
         )
         pdf_data = create_pdf_exam_paper(
             questions=questions,
@@ -720,6 +748,7 @@ if st.session_state.results:
             institution_name=st.session_state.institution_name,
             covered_chapters=covered_chaps,
             include_source=True,
+            include_knowledge_dim=True,
         )
         csv_data = df.to_csv(index=False).encode("utf-8")
 
