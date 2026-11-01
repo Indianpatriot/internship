@@ -1,10 +1,10 @@
 """Export utilities for generating professional DOCX and PDF question papers.
 
 Implements Paper Assembly & Export:
-- Table layout: (S.No, Question, Marks, BT, CO, Source)
+- Table layout: (S.No, Question Text, Marks, BT (Cognitive), Knowledge Dimension (KD), CO, [Source])
 - Section grouping (Part A: 10 Marks, Part B: 40 Marks)
 - Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
-- Bloom's Taxonomy & Course Outcome reference tables
+- Revised Bloom's Taxonomy (Cognitive & Knowledge dimensions) & Course Outcome reference tables
 """
 import io
 import docx
@@ -28,10 +28,11 @@ def create_docx_exam_paper(
     institution_name: str = "EXAMINATION QUESTION PAPER",
     covered_chapters: list[str] = None,
     include_source: bool = True,
+    include_knowledge_dim: bool = True,
 ) -> bytes:
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
-    Produces table layout: (S.No, Question, Marks, BT, CO, [Source]) with section grouping.
+    Produces table layout with Revised Bloom's Taxonomy (Cognitive and Knowledge dimensions).
     """
     doc = docx.Document()
 
@@ -96,7 +97,7 @@ def create_docx_exam_paper(
     inst_r1.font.size = Pt(10)
     inst_r2 = inst_p.add_run(
         "1. Answer all questions.\n"
-        "2. Figures to the right indicate allocated Marks, Bloom's Taxonomy Level (BT), and Course Outcome (CO).\n"
+        "2. Figures indicate allocated Marks, Cognitive Bloom's Level (BT), Knowledge Dimension (KD), and Course Outcome (CO).\n"
         "3. Read each question carefully before attempting."
     )
     inst_r2.font.size = Pt(9.5)
@@ -105,7 +106,15 @@ def create_docx_exam_paper(
 
     # 3. Main Question Table
     has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
-    if has_source:
+    has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
+
+    if has_kd and has_source:
+        headers = ["S.No", "Question Text", "Marks", "BT", "KD", "CO", "Source"]
+        t_widths = [Inches(0.6), Inches(3.2), Inches(0.55), Inches(0.55), Inches(0.75), Inches(0.55), Inches(0.75)]
+    elif has_kd and not has_source:
+        headers = ["S.No", "Question Text", "Marks", "BT", "KD", "CO"]
+        t_widths = [Inches(0.65), Inches(3.7), Inches(0.6), Inches(0.6), Inches(0.8), Inches(0.6)]
+    elif not has_kd and has_source:
         headers = ["S.No", "Question Text", "Marks", "BT", "CO", "Source"]
         t_widths = [Inches(0.65), Inches(3.6), Inches(0.6), Inches(0.6), Inches(0.6), Inches(0.9)]
     else:
@@ -128,13 +137,12 @@ def create_docx_exam_paper(
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for r in p.runs:
             r.bold = True
-            r.font.size = Pt(10)
+            r.font.size = Pt(9.5)
             r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         # Navy blue header background
         shading = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
         hdr_cells[i]._tc.get_or_add_tcPr().append(shading)
 
-    # Detect if questions have parts
     has_parts = any("part" in q for q in questions)
     current_part = None
 
@@ -145,7 +153,6 @@ def create_docx_exam_paper(
             part_qs = [x for x in questions if x.get("part") == current_part]
             part_m = sum(int(x.get("marks", 0)) for x in part_qs)
 
-            # Insert Part separator row
             part_row = q_table.add_row()
             merged_cell = part_row.cells[0]
             for c in part_row.cells[1:]:
@@ -166,34 +173,46 @@ def create_docx_exam_paper(
         for cell, w in zip(row_cells, t_widths):
             cell.width = w
 
-        row_cells[0].text = str(q.get("id", ""))
-        row_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        col_idx = 0
+        row_cells[col_idx].text = str(q.get("id", ""))
+        row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        col_idx += 1
 
-        row_cells[1].text = str(q.get("question", ""))
+        row_cells[col_idx].text = str(q.get("question", ""))
+        col_idx += 1
 
-        row_cells[2].text = f"[{q.get('marks', '')}]"
-        row_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        row_cells[col_idx].text = f"[{q.get('marks', '')}]"
+        row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        col_idx += 1
 
-        row_cells[3].text = str(q.get("level", ""))
-        row_cells[3].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        row_cells[col_idx].text = str(q.get("level", ""))
+        row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        col_idx += 1
 
-        row_cells[4].text = str(q.get("co", ""))
-        row_cells[4].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if has_kd:
+            kd_val = q.get("knowledge_dimension") or q.get("kd", "Conceptual")
+            row_cells[col_idx].text = str(kd_val)
+            row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            col_idx += 1
+
+        row_cells[col_idx].text = str(q.get("co", ""))
+        row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        col_idx += 1
 
         if has_source:
             ch = q.get("chapter", "")
             p_s = q.get("page_start", "")
             p_str = f"p.{p_s}" if p_s else ""
             src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
-            row_cells[5].text = src_str
-            row_cells[5].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            row_cells[col_idx].text = src_str
+            row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         for cell in row_cells:
             for p in cell.paragraphs:
                 for r in p.runs:
-                    r.font.size = Pt(9.5)
+                    r.font.size = Pt(9.0)
 
-    # 4. Course Outcomes and Bloom's Reference
+    # 4. Reference Section: Course Outcomes & Revised Bloom's Taxonomy
     if outcomes:
         doc.add_paragraph("")
         doc.add_paragraph("―" * 58).alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -204,7 +223,9 @@ def create_docx_exam_paper(
 
     bt_note = doc.add_paragraph()
     bt_run = bt_note.add_run(
-        "\nBloom's Taxonomy Levels: L1-Remember | L2-Understand | L3-Apply | L4-Analyze | L5-Evaluate | L6-Create"
+        "\nRevised Bloom's Taxonomy 2D Framework (Anderson & Krathwohl, 2001):\n"
+        "• Cognitive Process Dimension: L1-Remember | L2-Understand | L3-Apply | L4-Analyze | L5-Evaluate | L6-Create\n"
+        "• Knowledge Dimension: Factual | Conceptual | Procedural | Metacognitive"
     )
     bt_run.italic = True
     bt_run.font.size = Pt(8.5)
@@ -223,6 +244,7 @@ def create_pdf_exam_paper(
     institution_name: str = "EXAMINATION QUESTION PAPER",
     covered_chapters: list[str] = None,
     include_source: bool = True,
+    include_knowledge_dim: bool = True,
 ) -> bytes:
     """Generate a formatted PDF exam question paper using ReportLab."""
     buf = io.BytesIO()
@@ -266,8 +288,8 @@ def create_pdf_exam_paper(
     q_cell_style = ParagraphStyle(
         "QuestionCell",
         parent=styles["Normal"],
-        fontSize=9,
-        leading=12,
+        fontSize=8.5,
+        leading=11,
         textColor=colors.HexColor("#0F172A"),
         fontName="Helvetica",
     )
@@ -280,7 +302,7 @@ def create_pdf_exam_paper(
     hdr_style = ParagraphStyle(
         "HeaderCell",
         parent=styles["Normal"],
-        fontSize=9.5,
+        fontSize=9,
         leading=12,
         alignment=1,
         textColor=colors.white,
@@ -289,7 +311,7 @@ def create_pdf_exam_paper(
     part_style = ParagraphStyle(
         "PartCell",
         parent=styles["Normal"],
-        fontSize=9.5,
+        fontSize=9,
         leading=12,
         textColor=colors.HexColor("#1E3A8A"),
         fontName="Helvetica-Bold",
@@ -331,7 +353,7 @@ def create_pdf_exam_paper(
     elements.append(
         Paragraph(
             "1. Answer all questions.<br/>"
-            "2. Figures to the right indicate allocated Marks, Bloom's Taxonomy Level (BT), and Course Outcome (CO).<br/>"
+            "2. Figures indicate allocated Marks, Cognitive Bloom's Level (BT), Knowledge Dimension (KD), and Course Outcome (CO).<br/>"
             "3. Read each question carefully before attempting.",
             styles["Normal"],
         )
@@ -339,26 +361,50 @@ def create_pdf_exam_paper(
     elements.append(Spacer(1, 10))
 
     has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
-    if has_source:
-        table_data = [[
+    has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
+
+    if has_kd and has_source:
+        table_headers = [
+            Paragraph("S.No", hdr_style),
+            Paragraph("Question Text", hdr_style),
+            Paragraph("Marks", hdr_style),
+            Paragraph("BT", hdr_style),
+            Paragraph("KD", hdr_style),
+            Paragraph("CO", hdr_style),
+            Paragraph("Source", hdr_style),
+        ]
+        col_widths = [35, 215, 38, 42, 65, 42, 85]
+    elif has_kd and not has_source:
+        table_headers = [
+            Paragraph("S.No", hdr_style),
+            Paragraph("Question Text", hdr_style),
+            Paragraph("Marks", hdr_style),
+            Paragraph("BT", hdr_style),
+            Paragraph("KD", hdr_style),
+            Paragraph("CO", hdr_style),
+        ]
+        col_widths = [40, 275, 42, 45, 75, 45]
+    elif not has_kd and has_source:
+        table_headers = [
             Paragraph("S.No", hdr_style),
             Paragraph("Question Text", hdr_style),
             Paragraph("Marks", hdr_style),
             Paragraph("BT", hdr_style),
             Paragraph("CO", hdr_style),
             Paragraph("Source", hdr_style),
-        ]]
+        ]
         col_widths = [40, 260, 45, 45, 45, 85]
     else:
-        table_data = [[
+        table_headers = [
             Paragraph("S.No", hdr_style),
             Paragraph("Question Text", hdr_style),
             Paragraph("Marks", hdr_style),
             Paragraph("BT", hdr_style),
             Paragraph("CO", hdr_style),
-        ]]
+        ]
         col_widths = [45, 335, 45, 45, 50]
 
+    table_data = [table_headers]
     has_parts = any("part" in q for q in questions)
     current_part = None
     part_rows_indices = []
@@ -383,8 +429,14 @@ def create_pdf_exam_paper(
             Paragraph(str(q.get("question", "")), q_cell_style),
             Paragraph(f"[{q.get('marks', '')}]", q_bold_cell),
             Paragraph(str(q.get("level", "")), q_bold_cell),
-            Paragraph(str(q.get("co", "")), q_bold_cell),
         ]
+
+        if has_kd:
+            kd_val = q.get("knowledge_dimension") or q.get("kd", "Conceptual")
+            row.append(Paragraph(str(kd_val), q_bold_cell))
+
+        row.append(Paragraph(str(q.get("co", "")), q_bold_cell))
+
         if has_source:
             ch = q.get("chapter", "")
             p_s = q.get("page_start", "")
@@ -398,10 +450,10 @@ def create_pdf_exam_paper(
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
         ("ALIGN", (0, 0), (-1, -1), "LEFT"),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
     ]
 
@@ -418,6 +470,15 @@ def create_pdf_exam_paper(
         elements.append(Paragraph("<b>Course Outcomes (CO / LO) Reference:</b>", styles["Normal"]))
         for code, desc in outcomes.items():
             elements.append(Paragraph(f"• <b>{code}</b>: {desc}", styles["Normal"]))
+
+    elements.append(Spacer(1, 8))
+    elements.append(
+        Paragraph(
+            "<i>Revised Bloom's Taxonomy (Anderson & Krathwohl, 2001): Cognitive (L1-Remember to L6-Create) | "
+            "Knowledge Dimensions (Factual, Conceptual, Procedural, Metacognitive)</i>",
+            styles["Normal"],
+        )
+    )
 
     doc.build(elements)
     return buf.getvalue()
