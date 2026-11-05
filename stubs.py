@@ -1,35 +1,11 @@
-"""Stub implementations for teammate modules.
+"""Stub and implementation forwarding for teammate modules.
 
 OWNERSHIP RULES:
-- parse_scheme: OWNER: Alice
-- summarize: OWNER: Bob
+- parse_scheme: OWNER: Alice (implemented in scheme.py)
+- summarize: OWNER: Bob (or Alice in totals.py)
 """
 from typing import Any, Optional
-
-
-def parse_scheme(pdf_path: str) -> dict[str, Any]:
-    """OWNER: Alice
-    STUB - replace
-
-    Parse syllabus / scheme PDF to extract units, course outcomes, and textbook mappings.
-    """
-    return {
-        "units": [1, 2, 3, 4, 5],
-        "outcomes": {
-            "CO1": "Understand foundational principles and definitions",
-            "CO2": "Apply algorithms and methods to solve core problems",
-            "CO3": "Analyze computational complexity and structural designs",
-            "CO4": "Evaluate architectural trade-offs and performance criteria",
-            "CO5": "Design and synthesize robust software and engineering solutions",
-        },
-        "unit_sources": {
-            1: {"book_a": ["Chapter 1", "Chapter 2"]},
-            2: {"book_a": ["Chapter 3"], "book_b": ["Chapter 1"]},
-            3: {"book_b": ["Chapter 2", "Chapter 3"]},
-            4: {"book_b": ["Chapter 4", "Chapter 5"]},
-            5: {"book_c": None},
-        },
-    }
+from scheme import parse_scheme
 
 
 def summarize(questions: list[dict[str, Any]], targets: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -50,7 +26,7 @@ def summarize(questions: list[dict[str, Any]], targets: Optional[dict[str, Any]]
 
     targets_diff: dict[str, float] = {}
     if targets:
-        for k, target_val in targets.items():
+        for k in targets:
             targets_diff[k] = 0.0
 
     return {
