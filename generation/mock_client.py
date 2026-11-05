@@ -82,6 +82,11 @@ class MockClient:
         return True
 
     def generate(self, prompt, temperature=None, num_predict=120):
+        # Answer generation prompt
+        if "Model Answer:" in prompt or "authoritative model answer" in prompt:
+            return self._generate_answer(prompt)
+
+        # Question generation prompt
         verbs_match = re.search(r"verbs: ([^\n]+)", prompt)
         verbs = verbs_match.group(1).split(", ") if verbs_match else ["Explain"]
         ctx_match = re.search(r'"""\n(.*?)\n"""', prompt, re.S)
@@ -90,3 +95,48 @@ class MockClient:
         concept = _extract_concept(ctx)
         selected_verb = verbs[0].strip()
         return _format_question_with_verb(selected_verb, concept)
+
+    def _generate_answer(self, prompt: str) -> str:
+        ctx_match = re.search(r'"""\n(.*?)\n"""', prompt, re.S)
+        ctx = ctx_match.group(1).strip() if ctx_match else prompt
+
+        q_match = re.search(r"Question:\s*\n(.*?)(?:\n\s*Model Answer:|$)", prompt, re.S)
+        question = q_match.group(1).strip() if q_match else ""
+
+        m_match = re.search(r"(\d+)-mark", prompt)
+        marks = int(m_match.group(1)) if m_match else 5
+
+        raw_sents = [s.strip() for s in re.split(r"[\.\n]+", ctx) if len(s.strip().split()) >= 3]
+        if not raw_sents:
+            raw_sents = ["The technical system operates according to foundational computational principles."]
+
+        # Target words scale strictly with marks
+        target_words = max(20, min(400, marks * 22))
+        words_accum: list[str] = []
+        idx = 0
+        while len(words_accum) < target_words:
+            sent = raw_sents[idx % len(raw_sents)] + "."
+            words_accum.extend(sent.split())
+            idx += 1
+            if idx > 30:
+                break
+
+        primary_ans = " ".join(words_accum)
+
+        q_lower = question.lower()
+        has_or = any(w in q_lower for w in ["compare", "contrast", "differentiate", "distinguish", "alternative", " or "]) or "or" in q_lower.split()
+
+        if has_or and len(raw_sents) >= 2:
+            alt_words_target = max(15, min(200, marks * 15))
+            alt_accum: list[str] = []
+            idx = 1
+            while len(alt_accum) < alt_words_target:
+                sent = raw_sents[idx % len(raw_sents)] + "."
+                alt_accum.extend(sent.split())
+                idx += 1
+                if idx > 20:
+                    break
+            alt_ans = " ".join(alt_accum)
+            return f"{primary_ans}\nOR\n{alt_ans}"
+
+        return primary_ans

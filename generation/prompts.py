@@ -1,4 +1,6 @@
-"""Step 3b - prompt templates (one base template + per-level hints + Revised Bloom's knowledge dimension hints)."""
+"""Step 3b - prompt templates (one base template + per-level hints + Revised Bloom's knowledge dimension hints + answer generation)."""
+from typing import Optional
+
 from blooms.revised_taxonomy import normalize_knowledge_dimension
 from blooms.verb_bank import LEVEL_NAMES, normalize_level
 
@@ -56,4 +58,37 @@ def build_prompt(context, level, verbs, marks=None, knowledge_dimension=None) ->
         kd_hint=kd_hint,
         marks=MARKS_HINTS.get(marks, ""),
         context=context.strip(),
+    )
+
+
+ANSWER_BASE = """You are an expert exam evaluator and question paper author.
+Provide an authoritative model answer for the exam question below using ONLY the provided context.
+
+Rules:
+- Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text.
+- Give one primary, comprehensive model answer.
+- Target answer length: approximately {target_words} words (appropriate for a {marks}-mark question).
+- If the question genuinely admits more than one acceptable or alternative answer, provide each alternative after a separate line containing only "OR".
+- Output only the model answer text (and "OR" lines between distinct valid alternatives). No conversational preamble, no greetings, no markdown fences.
+
+Context:
+\"\"\"
+{context}
+\"\"\"
+
+Question:
+{question}
+
+Model Answer:"""
+
+
+def build_answer_prompt(question: str, context: str, marks: Optional[int] = None) -> str:
+    """Build prompt for generating a grounded model answer."""
+    m = marks if marks is not None and marks > 0 else 5
+    target_words = max(30, min(500, m * 25))
+    return ANSWER_BASE.format(
+        target_words=target_words,
+        marks=m,
+        context=context.strip(),
+        question=question.strip(),
     )
