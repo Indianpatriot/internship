@@ -1,4 +1,4 @@
-"""Step 3c / Issue 4 - question and answer generation with validation, retry and de-duplication."""
+"""Step 3c / Issue 4 - question and answer generation with validation, retry, de-duplication, and multi-book assembly."""
 import random
 import re
 from typing import Any, Optional
@@ -7,6 +7,7 @@ from blooms.revised_taxonomy import normalize_knowledge_dimension
 from blooms.verb_bank import first_word, normalize_level, sample_verbs, validate_question
 from config import ANSWER_MIN_SIMILARITY, MAX_CONTEXT_WORDS, MIN_CONTEXT_WORDS
 from generation.prompts import build_answer_prompt, build_prompt
+from retrieval.sources import select_chunks_for_unit
 
 
 def clean_output(raw: str) -> str:
@@ -203,12 +204,6 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
         on_progress: Optional callback on question accepted.
         unit_sources: Optional mapping {unit: {book_id: [chapters] or None}}.
     """
-    try:
-        from retrieval.sources import select_chunks_for_unit
-    except ImportError:
-        def select_chunks_for_unit(ch, us, u):
-            return ch
-
     rng = random.Random(seed)
     usable = [c for c in chunks if c.get("word_count", len(c["text"].split())) >= MIN_CONTEXT_WORDS]
     questions, rejected, unfilled, seen = [], [], [], []
@@ -230,7 +225,6 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
         if alt_group:
             used_ids = used_chunks_per_group.get(alt_group, set())
             filtered = [c for c in candidate_chunks if c.get("chunk_id") not in used_ids]
-            # Fall back to all candidates if all have been used
             pool_source = filtered if filtered else candidate_chunks
         else:
             pool_source = candidate_chunks
@@ -283,6 +277,7 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
             rec["unit"] = slot.get("unit")
             rec["question_no"] = slot.get("question_no")
             rec["sub_index"] = slot.get("sub_index")
+            rec["marks"] = slot.get("marks")
             rec["alternative_group"] = alt_group
             rec["book_id"] = chunk.get("book_id")
             rec["chapter"] = chunk.get("chapter")
@@ -305,3 +300,49 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
             unfilled.append(slot)
 
     return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
+
+
+def generate_full_paper(
+    chunks: list[dict[str, Any]],
+    blueprint: Any,
+    outcomes: dict[str, str],
+    unit_sources: Optional[dict[Any, Any]],
+    client: Any,
+    seed: Optional[int] = None,
+    on_progress: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Generate a complete exam paper with questions and model answers from blueprint and outcomes.
+
+    1. Scores chunks against outcomes using semantic embeddings (score_chunks_against_outcomes).
+    2. Generates question and answer for every slot using unit-filtered chunks and alternative anti-collision.
+    3. Returns {"questions": [QuestionRecord...], "rejected": [...], "unfilled": [...], "blueprint_report": {...}}.
+    """
+    from retrieval.co_mapper import score_chunks_against_outcomes
+
+    # 1. Score chunks against outcomes
+    scored_chunks = score_chunks_against_outcomes(chunks, outcomes)
+
+    # 2. Extract slots and report from blueprint
+    if isinstance(blueprint, dict):
+        slots = blueprint.get("slots", [])
+        blueprint_report = blueprint.get("report", {})
+    else:
+        slots = list(blueprint)
+        blueprint_report = {}
+
+    # 3. Generate paper by slots
+    result = generate_paper_by_slots(
+        chunks=scored_chunks,
+        slots=slots,
+        client=client,
+        seed=seed,
+        on_progress=on_progress,
+        unit_sources=unit_sources,
+    )
+
+    return {
+        "questions": result["questions"],
+        "rejected": result["rejected"],
+        "unfilled": result["unfilled"],
+        "blueprint_report": blueprint_report,
+    }

@@ -11,14 +11,16 @@ from ingestion.pdf_extract import load_pdf
 
 
 def ingest(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLAP_WORDS,
-           min_words=MIN_CHUNK_WORDS):
+           min_words=MIN_CHUNK_WORDS, book_id=None):
     lines, toc = load_pdf(pdf_path)
     heads = detect_headings(lines, toc)
     chunks = build_chunks(lines, heads, max_words, overlap_words, min_words)
     stem = re.sub(r"[^a-z0-9]+", "-", os.path.splitext(os.path.basename(pdf_path))[0].lower()).strip("-")
+    bid = book_id or stem
     for i, c in enumerate(chunks):
-        c["chunk_id"] = f"{stem}_{i:04d}"
+        c["chunk_id"] = f"{bid}_{i:04d}"
         c["source"] = os.path.basename(pdf_path)
+        c["book_id"] = bid
     return chunks
 
 
