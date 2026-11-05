@@ -1,7 +1,7 @@
 # Handoff Documentation: Blueprint Engine, Answers & Multi-Book Retrieval
 
-**Author**: Nitin  
-**Teammates**: Alice (Ingestion & Syllabus Scheme Parsing), Bob (UI & Document Export)
+**Authors**: Nitin (Contracts, Blueprint, Answers, Multi-Book Retrieval), Alice (Multi-Book Ingestion, Syllabus Parsing, Cumulative Totals)  
+**Teammates**: Alice, Bob (UI & Document Export), Nitin
 
 ---
 
@@ -13,8 +13,11 @@
 | `blueprint.py` (`build_blueprint`) | Nitin | **Complete** | Deficit-based greedy allocation engine for 50-mark and 100-mark presets |
 | `generation/generator.py` (`generate_answer`, `generate_full_paper`) | Nitin | **Complete** | Grounded model answer generation with `OR` alternative splitting, and full paper assembly |
 | `retrieval/sources.py` (`select_chunks_for_unit`) | Nitin | **Complete** | Multi-textbook chunk filtering by unit and chapter |
-| `stubs.py` (`parse_scheme`) | Alice | **Stub** (replace) | Syllabus PDF parser to extract units, outcomes, and textbook mappings |
-| `stubs.py` (`summarize`) | Bob / Alice | **Stub** (replace) | Cumulative totals and target difference summary for UI display |
+| `ingestion/library.py` (`add_book`, `load_library`, `list_chapters`, `suggest_unit_sources`, `validate_unit_sources`) | Alice | **Complete** | Multi-textbook ingestion, disk caching, chapter indexing, and source mapping |
+| `scheme.py` (`parse_scheme`, `parse_scheme_text`, `map_topics_to_chapters`) | Alice | **Complete** | Syllabus PDF/text parsing (units, outcomes, hours, textbooks) and topic semantic mapping |
+| `totals.py` (`summarize`, `totals_table_rows`) | Alice | **Complete** | Cumulative totals, choice question weighting, target deviations, and export tables |
+| `stubs.py` | Alice / Nitin | **Implemented** | Forwards to `scheme.parse_scheme` and `totals.summarize` |
+| `app.py` & `export_utils.py` | Bob | **Bob's Domain** | Streamlit UI and Word/PDF export integration |
 
 > **Note**: `app.py` and `export_utils.py` are strictly owned by Bob. Bob can import the plain functions documented below directly.
 
@@ -74,7 +77,7 @@ class Weights(TypedDict, total=False):
 
 ---
 
-## 3. Implemented Functions & Signatures
+## 3. Nitin's Functions & Signatures
 
 ### `build_blueprint`
 ```python
@@ -106,8 +109,6 @@ print("Total slots:", len(blueprint["slots"]))
 print("Max deviation:", blueprint["report"]["max_deviation"])
 ```
 
----
-
 ### `generate_full_paper`
 ```python
 def generate_full_paper(
@@ -121,31 +122,6 @@ def generate_full_paper(
 ) -> dict[str, Any]:
 ```
 **Returns**: `{"questions": list[QuestionRecord], "rejected": list[dict], "unfilled": list[Slot], "blueprint_report": dict}`
-
-**Example Call**:
-```python
-from generation.generator import generate_full_paper
-from generation.mock_client import MockClient
-
-client = MockClient()
-outcomes = {"CO1": "Understand algorithmic complexity", "CO2": "Apply graph algorithms"}
-unit_sources = {
-    1: {"textbook_a": ["Chapter 1", "Chapter 2"]},
-    2: {"textbook_b": None},  # All chapters
-}
-
-paper = generate_full_paper(
-    chunks=chunks,
-    blueprint=blueprint,
-    outcomes=outcomes,
-    unit_sources=unit_sources,
-    client=client,
-    seed=42,
-)
-print("Generated questions:", len(paper["questions"]))
-```
-
----
 
 ### `generate_answer`
 ```python
@@ -161,23 +137,6 @@ def generate_answer(
 ```
 **Returns**: `{"answer": str, "answer_alternatives": list[str], "valid": bool, "reason": str}`
 
-**Example Call**:
-```python
-from generation.generator import generate_answer
-from generation.mock_client import MockClient
-
-ans = generate_answer(
-    question="Explain the operational characteristics of binary search trees?",
-    chunk=sample_chunk,
-    marks=5,
-    client=MockClient(),
-)
-print("Answer text:", ans["answer"])
-print("Alternative count:", len(ans["answer_alternatives"]))
-```
-
----
-
 ### `select_chunks_for_unit`
 ```python
 def select_chunks_for_unit(
@@ -188,56 +147,139 @@ def select_chunks_for_unit(
 ```
 **Returns**: Filtered `list[dict[str, Any]]` matching the mapped textbooks and chapters for the specified unit.
 
-**Example Call**:
-```python
-from retrieval.sources import select_chunks_for_unit
+---
 
-unit_sources = {
-    1: {"data_structures_pdf": ["Chapter 1", "Chapter 2"]},
-    2: {"db_systems_pdf": None},
-}
+## 4. Alice's Functions: Ingestion Library, Scheme Parsing & Totals
 
-unit_1_chunks = select_chunks_for_unit(chunks, unit_sources, unit=1)
-```
+### A. Multi-Book Ingestion Library (`ingestion/library.py`)
+
+#### `load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None) -> dict[str, Any]`
+Ingests multiple textbook PDFs with SHA256 disk caching under `.cache/ingestion/` and automatic duplicate-stem disambiguation (e.g. `book`, `book_2`).
+- **Returns**: `{"books": {book_id: {"title": str, "path": str, "chapters": list[str], "n_chunks": int, "page_range": tuple[int, int]}}, "chunks": list[dict]}`
+- **Example**:
+  ```python
+  from ingestion.library import load_library
+  lib = load_library(["uploads/book1.pdf", "uploads/book2.pdf"])
+  print("Loaded books:", list(lib["books"].keys()))
+  ```
+
+#### `list_chapters(library: dict[str, Any], book_id: str) -> list[dict[str, Any]]`
+Provides chapters ordered by page appearance with chunk counts for Bob's chapter selector dropdown.
+- **Returns**: `[{"chapter": str, "chunks": int, "chunk_count": int, "page_start": int, "page_end": int}, ...]`
+- **Example**:
+  ```python
+  from ingestion.library import list_chapters
+  chaps = list_chapters(lib, "book1")
+  # [ {"chapter": "Chapter 1: Intro", "chunks": 8, "page_start": 1, "page_end": 14}, ... ]
+  ```
+
+#### `suggest_unit_sources(library: dict[str, Any], units: Any) -> dict[Any, dict[str, Any]]`
+Creates an initial best-effort textbook and chapter assignment across units in page order.
+- **Returns**: `{unit: {book_id: [chapters]}}`
+- **Example**:
+  ```python
+  from ingestion.library import suggest_unit_sources
+  sources = suggest_unit_sources(lib, units=[1, 2, 3, 4, 5])
+  ```
+
+#### `validate_unit_sources(library: dict[str, Any], unit_sources: Optional[dict[Any, Any]]) -> list[str]`
+Checks for unknown `book_id`s, chapters not present in the book, and units with zero usable chunks.
+- **Returns**: `list[str]` of human-readable problem messages (empty list if completely valid).
+- **Example**:
+  ```python
+  from ingestion.library import validate_unit_sources
+  problems = validate_unit_sources(lib, user_selected_sources)
+  if problems:
+      print("Configuration errors:", problems)
+  ```
 
 ---
 
-## 4. Teammate Stubs (`stubs.py`)
+### B. Syllabus Scheme Parsing (`scheme.py`)
 
-### `parse_scheme` (OWNER: Alice)
-```python
-def parse_scheme(pdf_path: str) -> dict[str, Any]:
-    """OWNER: Alice
-    STUB - replace
-    Extracts units, course outcomes, and textbook mappings from syllabus PDF.
-    """
-```
-**Example Call**:
-```python
-from stubs import parse_scheme
+#### `parse_scheme(pdf_path: str, library: Optional[dict[str, Any]] = None) -> dict[str, Any]`
+#### `parse_scheme_text(text: str, library: Optional[dict[str, Any]] = None) -> dict[str, Any]`
+Extracts units (Arabic/Roman numerals), lecture hours, topic lists, Course Outcomes (CO1..COn), textbooks, and fuzzy-matched unit sources using `difflib`.
+- **Returns**:
+  ```python
+  {
+      "units": [{"unit": 1, "title": "Divide & Conquer", "topics": ["Merge sort", ...], "hours": 8}],
+      "outcomes": {"CO1": "Understand algorithmic principles..."},
+      "unit_sources": {1: {"book1": None}},
+      "textbooks": ["Cormen et al., Introduction to Algorithms..."],
+      "confidence": 0.85,  # float in [0.0, 1.0]
+      "warnings": []       # list[str]
+  }
+  ```
+- **Example**:
+  ```python
+  from scheme import parse_scheme, parse_scheme_text
+  scheme = parse_scheme("syllabus.pdf", library=lib)
+  # or from user text input:
+  scheme = parse_scheme_text(pasted_text, library=lib)
+  ```
 
-scheme_data = parse_scheme("syllabus.pdf")
-units = scheme_data["units"]
-outcomes = scheme_data["outcomes"]
-unit_sources = scheme_data["unit_sources"]
-```
+#### `map_topics_to_chapters(scheme_units: list[dict[str, Any]], library: dict[str, Any]) -> dict[Any, list[dict[str, Any]]]`
+Computes semantic embeddings between each unit's topics and library chapters using SentenceTransformer.
+- **Returns**: `{unit_num: [{"book_id": str, "chapter": str, "score": float}, ...]}` sorted descending by relevance.
+- **Example**:
+  ```python
+  from scheme import map_topics_to_chapters
+  matches = map_topics_to_chapters(scheme["units"], lib)
+  best_for_unit_1 = matches[1][0]
+  print(f"Recommended: {best_for_unit_1['chapter']} (score {best_for_unit_1['score']})")
+  ```
 
-### `summarize` (OWNER: Bob)
-```python
-def summarize(
-    questions: list[dict[str, Any]],
-    targets: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    """OWNER: Bob
-    STUB - replace
-    Summarizes question totals across COs, BT levels, and target differences.
-    """
-```
-**Example Call**:
-```python
-from stubs import summarize
+---
 
-summary = summarize(paper["questions"])
-print("Total marks:", summary["total_marks"])
-print("Marks by CO:", summary["by_co"])
-```
+### C. Cumulative Totals & Export Tables (`totals.py`)
+
+#### `summarize(questions: list[dict[str, Any]], targets: Optional[dict[str, Any]] = None, attempted_only: bool = True) -> dict[str, Any]`
+Calculates exact marks, percentages, and question counts by Course Outcome, Bloom's level (L1-L6), and Bloom's band (L1-L2, L3-L4, L5-L6).
+- When `attempted_only=True`, alternative choice questions in the same `alternative_group` count once toward attempted marks while reporting full `offered_marks`.
+- **Returns**:
+  ```python
+  {
+      "by_co": {code: {"marks": int, "pct": float, "questions": int}},
+      "by_bt": {"L1": {"marks": int, "pct": float, "questions": int}, ..., "L6": ...},
+      "by_bt_band": {"L1-L2": {"marks": int, "pct": float, "questions": int}, ...},
+      "total_marks": int,
+      "offered_marks": int,
+      "targets_diff": {"bt_band": {...}, "co": {...}}
+  }
+  ```
+- **Example**:
+  ```python
+  from totals import summarize
+  stats = summarize(paper["questions"], targets=blueprint["weights"])
+  print(f"Total Attempted: {stats['total_marks']} / Offered: {stats['offered_marks']}")
+  ```
+
+#### `totals_table_rows(summary: dict[str, Any]) -> dict[str, list[list[Any]]]`
+Transforms summary analytics into structured list-of-lists tables with totals ready for Bob's Word/PDF export without formatting logic.
+- **Returns**: `{"co_table": list[list[Any]], "bt_table": list[list[Any]]}`
+- **Example**:
+  ```python
+  from totals import totals_table_rows
+  tables = totals_table_rows(stats)
+  co_rows = tables["co_table"]  # [ ["Course Outcome", "Marks", "Percentage", "Questions Count"], ... ]
+  bt_rows = tables["bt_table"]  # [ ["Bloom's Taxonomy Band / Level", "Marks", ...], ... ]
+  ```
+
+---
+
+## 5. UI Integration Guide for Bob
+
+Bob should call the following plain functions directly in `app.py` and `export_utils.py`:
+
+| UI Step / Component | Function to Call | Import Location |
+| :--- | :--- | :--- |
+| **1. Textbook Upload** | `load_library(paths)` | `from ingestion.library import load_library` |
+| **2. Chapter Selector UI** | `list_chapters(library, book_id)` | `from ingestion.library import list_chapters` |
+| **3. Syllabus Upload / Paste** | `parse_scheme(pdf)` or `parse_scheme_text(text)` | `from scheme import parse_scheme, parse_scheme_text` |
+| **4. Default Source Mapping** | `suggest_unit_sources(library, units)` | `from ingestion.library import suggest_unit_sources` |
+| **5. Source Mapping Check** | `validate_unit_sources(library, unit_sources)` | `from ingestion.library import validate_unit_sources` |
+| **6. Semantic Chapter Auto-Map**| `map_topics_to_chapters(scheme_units, library)` | `from scheme import map_topics_to_chapters` |
+| **7. Paper Generation** | `build_blueprint(...)`<br>`generate_full_paper(...)` | `from blueprint import build_blueprint`<br>`from generation.generator import generate_full_paper` |
+| **8. Paper Analytics & Dashboard**| `summarize(questions, targets=...)` | `from totals import summarize` |
+| **9. Word / PDF Table Export** | `totals_table_rows(summary)` | `from totals import totals_table_rows` |
