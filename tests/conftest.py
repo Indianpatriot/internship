@@ -38,3 +38,35 @@ def sample_pdf(tmp_path):
         page.insert_textbox(fitz.Rect(72, y, 520, 780), make_body(p * 7), fontsize=11, fontname="helv")
     doc.save(path)
     return str(path)
+
+
+class _FakeEmbedder:
+    """Deterministic bag-of-words embedder used when sentence-transformers is unavailable."""
+
+    DIM = 256
+
+    def encode(self, texts, normalize_embeddings=True, **_):
+        import re
+        import zlib
+
+        import numpy as np
+
+        out = np.zeros((len(texts), self.DIM), dtype="float32")
+        for i, t in enumerate(texts):
+            for w in re.findall(r"[a-z0-9]+", t.lower()):
+                out[i, zlib.crc32(w.encode()) % self.DIM] += 1.0
+        if normalize_embeddings:
+            norms = np.linalg.norm(out, axis=1, keepdims=True)
+            out = out / np.where(norms == 0, 1.0, norms)
+        return out
+
+
+@pytest.fixture(autouse=True)
+def _offline_embedder(monkeypatch):
+    """Use a fake embedder only if the real model package is not installed."""
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        import retrieval.co_mapper as co_mapper
+
+        monkeypatch.setattr(co_mapper, "_m", lambda: _FakeEmbedder())
