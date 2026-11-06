@@ -230,6 +230,12 @@ Computes semantic embeddings between each unit's topics and library chapters usi
   print(f"Recommended: {best_for_unit_1['chapter']} (score {best_for_unit_1['score']})")
   ```
 
+#### Scheme confirm / manual fallback (`scheme.py`)
+- `parse_scheme(...)` / `parse_scheme_text(...)` now also return `needs_manual: bool`. With a `library`, `unit_sources` is pre-filled as `{unit: {book_id: [chapter]}}` (semantic match, keyword-overlap fallback if the embedding model is missing, page-order split as last resort) so the UI only asks the user to confirm.
+- `needs_manual` is True when no units/outcomes were found, confidence < 0.5, or the PDF is unreadable/scanned. The UI should then show `manual_scheme_template(n_units, n_outcomes)` as editable fields.
+- `merge_manual_entry(scheme, units=, outcomes=, unit_sources=)` overlays what the user typed/confirmed and returns the final scheme (`confirmed=True`).
+- `prefill_unit_sources(scheme, library, top_k=1)` is the underlying helper.
+
 ---
 
 ### C. Cumulative Totals & Export Tables (`totals.py`)
