@@ -7,6 +7,7 @@ Extracts:
 - Fuzzy-matched unit sources and semantic topic-to-chapter embeddings
 """
 import difflib
+import math
 import re
 from typing import Any, Optional
 
@@ -26,6 +27,8 @@ ROMAN_NUMS = {
     "xi": 11,
     "xii": 12,
 }
+
+MANUAL_CONFIDENCE_THRESHOLD = 0.5
 
 UNIT_HEADER_RE = re.compile(
     r"^(?:unit|module|part)\s*[:.\-–—]?\s*([0-9ivxlc]+)\b\s*[:.\-–—]?\s*(.*)$",
@@ -230,7 +233,7 @@ def parse_scheme_text(
     if not textbooks:
         warnings.append("No textbooks or references section found in scheme.")
 
-    return {
+    result = {
         "units": units_data,
         "outcomes": outcomes,
         "unit_sources": unit_sources,
@@ -238,6 +241,66 @@ def parse_scheme_text(
         "confidence": confidence,
         "warnings": warnings,
     }
+
+    # Pre-fill unit -> book/chapter mapping so the user only has to confirm it.
+    if library_books and units_data:
+        prefill_unit_sources(result, library)
+
+    # Flag when the UI should drop to manual entry instead of confirm-only.
+    result["needs_manual"] = scheme_needs_manual(result)
+    if result["needs_manual"]:
+        warnings.append(
+            "Scheme could not be parsed reliably; please enter units and outcomes manually."
+        )
+    return result
+
+
+def scheme_needs_manual(scheme: dict[str, Any]) -> bool:
+    """True when parsing found too little for a confirm-only screen."""
+    return (
+        not scheme.get("units")
+        or not scheme.get("outcomes")
+        or float(scheme.get("confidence", 0.0)) < MANUAL_CONFIDENCE_THRESHOLD
+    )
+
+
+def manual_scheme_template(n_units: int = 5, n_outcomes: int = 5) -> dict[str, Any]:
+    """Blank scheme in the same shape as parse_scheme output, for manual entry."""
+    return {
+        "units": [
+            {"unit": i, "title": f"Unit {i}", "topics": [], "hours": None}
+            for i in range(1, n_units + 1)
+        ],
+        "outcomes": {f"CO{i}": "" for i in range(1, n_outcomes + 1)},
+        "unit_sources": {i: None for i in range(1, n_units + 1)},
+        "textbooks": [],
+        "confidence": 0.0,
+        "warnings": [],
+        "needs_manual": True,
+    }
+
+
+def merge_manual_entry(
+    scheme: Optional[dict[str, Any]],
+    units: Optional[list[dict[str, Any]]] = None,
+    outcomes: Optional[dict[str, str]] = None,
+    unit_sources: Optional[dict[Any, Any]] = None,
+) -> dict[str, Any]:
+    """Overlay user-entered/confirmed values on a (possibly failed) parse result.
+
+    Anything the user supplies wins; anything omitted keeps the parsed value.
+    Empty outcome descriptions are dropped. The result is marked as confirmed.
+    """
+    base = dict(scheme) if scheme else manual_scheme_template(0, 0)
+    if units is not None:
+        base["units"] = sorted(units, key=lambda u: u.get("unit", 0))
+    if outcomes is not None:
+        base["outcomes"] = {k: v for k, v in outcomes.items() if str(v).strip()}
+    if unit_sources is not None:
+        base["unit_sources"] = unit_sources
+    base["needs_manual"] = False
+    base["confirmed"] = True
+    return base
 
 
 def parse_scheme(
@@ -261,16 +324,26 @@ def parse_scheme(
         doc.close()
         text = "\n".join(full_text_parts)
     except Exception as e:
-        return {
-            "units": [],
-            "outcomes": {},
-            "unit_sources": {},
-            "textbooks": [],
-            "confidence": 0.0,
-            "warnings": [f"Could not read PDF file: {e}"],
-        }
+        failed = manual_scheme_template(0, 0)
+        failed["unit_sources"] = {}
+        failed["warnings"] = [f"Could not read PDF file: {e}"]
+        return failed
 
-    return parse_scheme_text(text, library=library)
+    if not text.strip():
+        failed = manual_scheme_template(0, 0)
+        failed["unit_sources"] = {}
+        failed["warnings"] = [
+            "No text found in the scheme PDF (scanned image?); please enter it manually."
+        ]
+        return failed
+
+    try:
+        return parse_scheme_text(text, library=library)
+    except Exception as e:  # never let a parser bug block the UI
+        failed = manual_scheme_template(0, 0)
+        failed["unit_sources"] = {}
+        failed["warnings"] = [f"Scheme parsing failed: {e}"]
+        return failed
 
 
 def map_topics_to_chapters(
@@ -287,9 +360,13 @@ def map_topics_to_chapters(
     if not scheme_units or not books or not chunks:
         return {u.get("unit", i + 1): [] for i, u in enumerate(scheme_units)}
 
-    from retrieval.co_mapper import _m
+    try:
+        from retrieval.co_mapper import _m
 
-    model = _m()
+        model = _m()
+    except Exception:
+        # Embedding model unavailable (not installed / offline): keyword overlap.
+        return _lexical_chapter_map(scheme_units, books, chunks)
 
     # Pre-compile chapter texts from chunks
     chapter_entries: list[tuple[str, str, str]] = []  # (book_id, chapter, aggregated_text)
@@ -332,3 +409,92 @@ def map_topics_to_chapters(
         result[u_num] = matches
 
     return result
+
+
+_STOPWORDS = {
+    "the", "and", "for", "with", "from", "into", "that", "this", "are", "was", "using",
+    "use", "its", "their", "of", "in", "on", "to", "a", "an", "or", "by", "is", "as",
+    "chapter", "unit", "module", "introduction", "basics", "overview",
+}
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        t for t in re.findall(r"[a-z][a-z0-9]{2,}", (text or "").lower()) if t not in _STOPWORDS
+    }
+
+
+def _lexical_chapter_map(
+    scheme_units: list[dict[str, Any]],
+    books: dict[str, Any],
+    chunks: list[dict[str, Any]],
+) -> dict[Any, list[dict[str, Any]]]:
+    """Keyword-overlap fallback for map_topics_to_chapters (same return shape)."""
+    entries: list[tuple[str, str, set[str], set[str]]] = []
+    for bid, binfo in books.items():
+        for ch in binfo.get("chapters", []):
+            body = " ".join(
+                c.get("text", "")
+                for c in chunks
+                if c.get("book_id") == bid and c.get("chapter") == ch
+            )
+            entries.append((bid, ch, _tokens(ch), _tokens(body)))
+
+    result: dict[Any, list[dict[str, Any]]] = {}
+    for i, u in enumerate(scheme_units):
+        u_num = u.get("unit", i + 1)
+        q = _tokens(u.get("title", "") + " " + " ".join(u.get("topics", [])))
+        matches = []
+        for bid, ch, title_tok, body_tok in entries:
+            if q:
+                hit_body = len(q & body_tok) / math.sqrt(len(q))
+                hit_title = 2.0 * len(q & title_tok) / math.sqrt(len(q))
+                score = (hit_body + hit_title) / 3.0
+            else:
+                score = 0.0
+            matches.append({"book_id": bid, "chapter": ch, "score": round(float(score), 3)})
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        result[u_num] = matches
+    return result
+
+
+def prefill_unit_sources(
+    scheme: dict[str, Any],
+    library: dict[str, Any],
+    top_k: int = 1,
+    min_score: float = 0.0,
+) -> dict[Any, Any]:
+    """Fill scheme["unit_sources"] with best-guess {book_id: [chapters]} per unit.
+
+    Units already matched to a specific textbook keep that book but still get
+    chapters chosen within it. If nothing scores above min_score the page-order
+    split from ingestion.library.suggest_unit_sources is used. Mutates and
+    returns scheme["unit_sources"]; the user only has to confirm or tweak it.
+    """
+    from ingestion.library import suggest_unit_sources
+
+    units = scheme.get("units", [])
+    if not units or not library.get("books"):
+        return scheme.get("unit_sources", {})
+
+    matches = map_topics_to_chapters(units, library)
+    fallback = suggest_unit_sources(library, [u["unit"] for u in units])
+    existing = scheme.get("unit_sources") or {}
+    filled: dict[Any, Any] = {}
+
+    for u in units:
+        n = u["unit"]
+        ranked = [m for m in matches.get(n, []) if m["score"] > min_score]
+        pinned = existing.get(n)
+        if pinned:
+            ranked = [m for m in ranked if m["book_id"] in pinned]
+        if not ranked:
+            filled[n] = pinned or fallback.get(n) or None
+            continue
+        picked: dict[str, list[str]] = {}
+        for m in ranked[:top_k]:
+            picked.setdefault(m["book_id"], []).append(m["chapter"])
+        filled[n] = picked
+
+    scheme["unit_sources"] = filled
+    return filled
