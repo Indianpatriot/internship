@@ -199,3 +199,22 @@ def test_end_to_end_library_scheme_generation_totals(tmp_path):
     expected_sum = sum(q["marks"] for q in questions)
     assert summary["total_marks"] == expected_sum
     assert summary["offered_marks"] == expected_sum
+
+
+def test_marks_per_co_and_level_with_choice_and_targets_diff():
+    qs = [
+        {"id": "1", "question_no": 1, "marks": 10, "co": "CO1", "level": "L2", "alternative_group": "U1"},
+        {"id": "2", "question_no": 2, "marks": 10, "co": "CO2", "level": "L5", "alternative_group": "U1"},
+        {"id": "3", "question_no": 3, "marks": 20, "co": "CO2", "level": "L3", "alternative_group": None},
+    ]
+    s = summarize(qs, targets={"bt": {"L1-L2": 0.2, "L3-L4": 0.6, "L5-L6": 0.2}, "co": {"CO1": 0.5, "CO2": 0.5}})
+    assert (s["total_marks"], s["offered_marks"]) == (30, 40)  # one of the pair counted
+    assert s["by_co"]["CO1"]["marks"] == 10 and s["by_co"]["CO2"]["marks"] == 20
+    assert s["by_bt"]["L2"]["marks"] == 10 and s["by_bt"]["L3"]["marks"] == 20
+    assert s["by_bt_band"]["L1-L2"]["pct"] == 33.33
+    assert s["targets_diff"]["co"] == {"CO1": -16.67, "CO2": 16.67}
+    assert s["targets_diff"]["bt_band"]["L3-L4"] == 6.67
+    import json
+    json.dumps(s)  # plain data only: usable by the screen and the export
+    s_all = summarize(qs, attempted_only=False)
+    assert s_all["total_marks"] == 40
