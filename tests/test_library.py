@@ -180,3 +180,16 @@ def test_suggest_unit_sources_splits_chapters(tmp_path):
     assert 1 in unit_sources and 2 in unit_sources
     assert len(unit_sources[1]) > 0
     assert len(unit_sources[2]) > 0
+
+
+def test_every_chunk_tagged_with_its_own_book_title_and_cached_separately(tmp_path):
+    a, b = tmp_path / "algorithms-text.pdf", tmp_path / "db_concepts.pdf"
+    _create_sample_pdf(a, "Algorithms")
+    _create_sample_pdf(b, "Databases")
+    cache = tmp_path / "cache"
+    lib = load_library([a, b], cache_dir=cache)
+
+    for c in lib["chunks"]:
+        assert c["book_title"] == lib["books"][c["book_id"]]["title"]
+    assert {c["book_title"] for c in lib["chunks"]} == {"Algorithms Text", "Db Concepts"}
+    assert len(list(cache.glob("*.json"))) == 2  # one cache file per book
