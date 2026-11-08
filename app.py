@@ -11,6 +11,7 @@ import streamlit as st
 
 import config
 from blueprint import (
+    build_blueprint,
     get_50_mark_blueprint,
     get_25_mark_blueprint,
     calculate_blueprint_stats,
@@ -21,6 +22,7 @@ from blooms.revised_taxonomy import (
     COGNITIVE_LEVEL_NAMES,
     normalize_knowledge_dimension,
 )
+from contracts import DEFAULT_BT_WEIGHTS, TEACHER_BT_RANGES
 from chapter_filter import (
     filter_chunks,
     get_chapter_metadata,
@@ -32,6 +34,8 @@ from generation.ollama_client import OllamaClient
 from generation.generator import generate_paper_by_slots
 from ingestion.pipeline import ingest
 from retrieval.co_mapper import score_chunks_against_outcomes, _m
+from scheme import parse_scheme, parse_scheme_text
+from totals import summarize, totals_table_rows
 
 # -----------------------------------------------------------------------------
 # Page Configuration & Styling
@@ -150,6 +154,15 @@ if "institution_name" not in st.session_state:
 if "subject_code" not in st.session_state:
     st.session_state.subject_code = "CS-302"
 
+if "scheme" not in st.session_state:
+    st.session_state.scheme = None
+
+if "target_weights" not in st.session_state:
+    st.session_state.target_weights = {
+        "bt": dict(DEFAULT_BT_WEIGHTS),
+        "co": {co: 1.0 / len(available_cos) for co in available_cos},
+    }
+
 
 # -----------------------------------------------------------------------------
 # Sidebar: LLM Configuration & Exam Metadata
@@ -211,14 +224,65 @@ with st.sidebar:
 
 
 # -----------------------------------------------------------------------------
-# Main Header
+# Main Header & Scheme Upload Banner (Substep 1.3)
 # -----------------------------------------------------------------------------
 st.markdown('<div class="main-title">Outcome-Aware Question Paper Generator</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="subtitle">Upload a textbook PDF, select chapters, define Course Outcomes (CO/LO), '
-    'and generate a balanced 50-mark exam paper mapped to <b>Revised Bloom\'s Taxonomy</b> (Cognitive & Knowledge dimensions).</div>',
+    'and generate a balanced 50/100-mark exam paper mapped to <b>Revised Bloom\'s Taxonomy</b> (Cognitive & Knowledge dimensions).</div>',
     unsafe_allow_html=True,
 )
+
+# Substep 1.3: Banner: "Upload your scheme for a more precise paper."
+st.info("📋 **Upload your scheme for a more precise paper.**")
+with st.expander("📋 Upload your scheme for a more precise paper.", expanded=False):
+    st.caption("Upload your syllabus scheme (PDF or text) to automatically extract Course Outcomes (COs), unit modules, hours, and textbook mappings.")
+    col_sch_f, col_sch_t = st.columns([1, 1])
+    with col_sch_f:
+        scheme_file = st.file_uploader(
+            "Upload Syllabus / Scheme (PDF or TXT)",
+            type=["pdf", "txt"],
+            key="scheme_uploader",
+            help="Syllabus PDF or text containing Units, Hours, Course Outcomes, and Prescribed Textbooks.",
+        )
+    with col_sch_t:
+        scheme_paste = st.text_area(
+            "Or paste syllabus text directly:",
+            placeholder="Unit 1: Introduction (8 hours)...\nCO1: Understand core principles...\nTextbooks: ...",
+            key="scheme_text_area",
+            height=110,
+        )
+
+    if st.button("Parse & Apply Scheme", key="btn_parse_scheme"):
+        parsed = None
+        if scheme_file:
+            if scheme_file.name.endswith(".pdf"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(scheme_file.getvalue())
+                    tmp_p = tmp.name
+                try:
+                    parsed = parse_scheme(tmp_p)
+                finally:
+                    if os.path.exists(tmp_p):
+                        try:
+                            os.remove(tmp_p)
+                        except OSError:
+                            pass
+            else:
+                parsed = parse_scheme_text(scheme_file.getvalue().decode("utf-8", errors="ignore"))
+        elif scheme_paste.strip():
+            parsed = parse_scheme_text(scheme_paste)
+
+        if parsed:
+            st.session_state.scheme = parsed
+            if parsed.get("outcomes"):
+                st.session_state.outcomes = [
+                    {"code": k, "desc": v} for k, v in parsed["outcomes"].items()
+                ]
+                st.success(f"✓ Extracted {len(parsed['outcomes'])} Course Outcomes and {len(parsed.get('units', []))} Units from scheme!")
+                st.rerun()
+            else:
+                st.warning("Scheme parsed, but no Course Outcomes (CO1..COn) were detected.")
 
 # -----------------------------------------------------------------------------
 # Section 1: Course Outcomes (Dynamic CRUD)
@@ -277,7 +341,7 @@ st.divider()
 # -----------------------------------------------------------------------------
 st.subheader("2. Question Paper Blueprint (Slots)")
 st.caption(
-    "Define the 50-mark structure: Part A (Short Questions) and Part B (Long questions with a/b subparts). "
+    "Configure blueprint preset, sub-questions per question, and target weightages. "
     "Map each question across the <b>Cognitive Process Dimension (L1–L6)</b> and <b>Knowledge Dimension (Factual, Conceptual, Procedural, Metacognitive)</b>."
 )
 
@@ -285,15 +349,109 @@ available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code
 if not available_cos:
     available_cos = ["CO1"]
 
+# Substep 1.1: UI Controls (Preset dropdown 50/100, Sub-questions input, Weightage sliders)
+col_preset, col_subq = st.columns([1.5, 1.5])
+with col_preset:
+    preset_options = [
+        "50 Marks (Standard)",
+        "100 Marks (Choice)",
+        "25 Marks (Internal Assessment)",
+        "Custom Blueprint",
+    ]
+    selected_preset = st.selectbox(
+        "Exam Preset",
+        options=preset_options,
+        index=0 if "selected_preset_idx" not in st.session_state else st.session_state.selected_preset_idx,
+        help="Select 50-mark standard exam, 100-mark exam with internal choice, or custom structure.",
+    )
+with col_subq:
+    sub_questions_input = st.number_input(
+        "Sub-questions per question",
+        min_value=1,
+        max_value=4,
+        value=int(st.session_state.get("sub_questions_count", 2)),
+        step=1,
+        help="Number of subparts (e.g. (a), (b)) generated per main question slot.",
+    )
+    st.session_state.sub_questions_count = sub_questions_input
+
+with st.expander("⚖️ Bloom's Taxonomy & Course Outcome Weightage Sliders", expanded=False):
+    col_bt_w, col_co_w = st.columns(2)
+    with col_bt_w:
+        st.markdown("**Bloom's Taxonomy (BT) Cognitive Band Weightage (%)**")
+        st.caption("Standard target ranges: L1–L2 (30–40%), L3–L4 (30–40%), L5–L6 (10–20%)")
+        w_l12 = st.slider("L1–L2 (Remember / Understand) %", min_value=10, max_value=60, value=int(st.session_state.get("w_l12", 40)), step=5)
+        w_l34 = st.slider("L3–L4 (Apply / Analyze) %", min_value=10, max_value=60, value=int(st.session_state.get("w_l34", 40)), step=5)
+        w_l56 = st.slider("L5–L6 (Evaluate / Create) %", min_value=5, max_value=40, value=int(st.session_state.get("w_l56", 20)), step=5)
+        st.session_state.w_l12 = w_l12
+        st.session_state.w_l34 = w_l34
+        st.session_state.w_l56 = w_l56
+
+        tot_bt_w = w_l12 + w_l34 + w_l56
+        if tot_bt_w != 100:
+            st.caption(f"Current BT total: {tot_bt_w}% (will be normalized proportionally)")
+
+    with col_co_w:
+        st.markdown("**Course Outcomes (CO) Weightage (%)**")
+        st.caption("Allocate percentage emphasis across syllabus Course Outcomes.")
+        co_weights_input = {}
+        equal_pct = max(5, int(100 / max(len(available_cos), 1)))
+        for c in available_cos:
+            saved_val = st.session_state.get(f"w_co_{c}", equal_pct)
+            co_weights_input[c] = st.slider(f"{c} Weightage %", min_value=5, max_value=100, value=int(saved_val), step=5, key=f"slider_co_{c}")
+            st.session_state[f"w_co_{c}"] = co_weights_input[c]
+
+        tot_co_w = sum(co_weights_input.values())
+        if tot_co_w != 100:
+            st.caption(f"Current CO total: {tot_co_w}% (will be normalized proportionally)")
+
+# Preset Action Buttons
 col_p1, col_p2, col_p3 = st.columns([2.5, 2.5, 2])
 with col_p1:
-    if st.button("🎓 Load 50-Mark Blueprint (Standard)", use_container_width=True):
-        st.session_state.slots = get_50_mark_blueprint(available_cos)
+    if st.button("⚙️ Apply Preset & Weightages", use_container_width=True):
+        tot_bt_val = max(w_l12 + w_l34 + w_l56, 1)
+        eff_bt_weights = {
+            "L1-L2": w_l12 / tot_bt_val,
+            "L3-L4": w_l34 / tot_bt_val,
+            "L5-L6": w_l56 / tot_bt_val,
+        }
+        tot_co_val = max(sum(co_weights_input.values()), 1)
+        eff_co_weights = {
+            c: v / tot_co_val for c, v in co_weights_input.items()
+        }
+        st.session_state.target_weights = {"bt": eff_bt_weights, "co": eff_co_weights}
+
+        if "100" in selected_preset:
+            bp = build_blueprint(
+                preset=100,
+                sub_question_counts=sub_questions_input,
+                bt_weights=eff_bt_weights,
+                co_weights=eff_co_weights,
+                seed=42,
+            )
+            st.session_state.slots = bp["slots"]
+            st.session_state.selected_preset_idx = 1
+        elif "25" in selected_preset:
+            st.session_state.slots = get_25_mark_blueprint(available_cos)
+            st.session_state.selected_preset_idx = 2
+        else:
+            bp = build_blueprint(
+                preset=50,
+                sub_question_counts=sub_questions_input,
+                bt_weights=eff_bt_weights,
+                co_weights=eff_co_weights,
+                seed=42,
+            )
+            st.session_state.slots = bp["slots"]
+            st.session_state.selected_preset_idx = 0
         st.rerun()
+
 with col_p2:
-    if st.button("📝 Load 25-Mark Blueprint (Internal)", use_container_width=True):
-        st.session_state.slots = get_25_mark_blueprint(available_cos)
+    if st.button("🎓 Standard 50-Mark Blueprint", use_container_width=True):
+        st.session_state.slots = get_50_mark_blueprint(available_cos)
+        st.session_state.selected_preset_idx = 0
         st.rerun()
+
 with col_p3:
     if st.button("🔄 Reset to Blank", use_container_width=True):
         st.session_state.slots = [
@@ -306,6 +464,7 @@ with col_p3:
                 "marks": 2,
             }
         ]
+        st.session_state.selected_preset_idx = 3
         st.rerun()
 
 # Calculate Blueprint Statistics
@@ -650,12 +809,14 @@ if generate_clicked:
                 progress_state["count"] += 1
                 progress_bar.progress(min(progress_state["count"] / max(total_slots, 1), 1.0))
 
+            unit_sources = st.session_state.scheme.get("unit_sources") if st.session_state.scheme else None
             results = generate_paper_by_slots(
                 chunks=scored_chunks,
                 slots=st.session_state.slots,
                 client=client,
                 seed=42,
                 on_progress=on_progress_callback,
+                unit_sources=unit_sources,
             )
             progress_bar.progress(1.0)
             results["covered_chapters"] = selected_chapters
@@ -663,7 +824,7 @@ if generate_clicked:
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
 # -----------------------------------------------------------------------------
-# Section 4: Results Display & Export (Step 5)
+# Section 4: Results Display & Export (Step 1.2, 2.1, 2.2)
 # -----------------------------------------------------------------------------
 if st.session_state.results:
     res = st.session_state.results
@@ -721,14 +882,58 @@ if st.session_state.results:
             use_container_width=True,
         )
 
-        # Export Section (DOCX, PDF, CSV)
-        st.write("#### 📥 Export Formatted Question Paper")
+        # Substep 1.2 & Step 2: Export Controls & Cumulative Totals Checkbox
+        st.write("#### 📥 Export Formatted Question Paper & Evaluation Scheme")
         course_title = getattr(st.session_state, "course_title", "Course Examination")
         outcomes_map = {
             o["code"].strip(): o["desc"].strip()
             for o in st.session_state.outcomes
             if o["code"].strip()
         }
+
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            # Substep 1.2: Checkbox: "Add cumulative CO/BT totals"
+            add_totals = st.checkbox(
+                "Add cumulative CO/BT totals",
+                value=True,
+                help="Append cumulative Course Outcome (CO) and Bloom's Taxonomy (BT) distribution tables to DOCX, PDF, and UI summary.",
+            )
+        with col_opt2:
+            include_answers = st.checkbox(
+                "Include Model Answers & Scheme of Evaluation",
+                value=True,
+                help="Include verified model answers (with OR alternative format) in DOCX and PDF papers.",
+            )
+
+        # Calculate totals summary if requested
+        totals_summary = None
+        if add_totals:
+            totals_summary = summarize(
+                questions,
+                targets=st.session_state.get("target_weights"),
+                attempted_only=True,
+            )
+            with st.expander("📊 View Cumulative CO / BT Distribution Totals", expanded=False):
+                st.markdown(
+                    f"**Total Attempted Marks:** `{totals_summary.get('total_marks', 0)}` | "
+                    f"**Total Offered Marks:** `{totals_summary.get('offered_marks', 0)}`"
+                )
+                tbl_rows = totals_table_rows(totals_summary)
+                co_tbl = tbl_rows.get("co_table", [])
+                bt_tbl = tbl_rows.get("bt_table", [])
+
+                c_co, c_bt = st.columns(2)
+                with c_co:
+                    st.markdown("**Course Outcomes (CO) Distribution:**")
+                    if co_tbl:
+                        df_co = pd.DataFrame(co_tbl[1:], columns=co_tbl[0])
+                        st.dataframe(df_co, hide_index=True, use_container_width=True)
+                with c_bt:
+                    st.markdown("**Bloom's Taxonomy (BT) Distribution:**")
+                    if bt_tbl:
+                        df_bt = pd.DataFrame(bt_tbl[1:], columns=bt_tbl[0])
+                        st.dataframe(df_bt, hide_index=True, use_container_width=True)
 
         docx_data = create_docx_exam_paper(
             questions=questions,
@@ -739,6 +944,9 @@ if st.session_state.results:
             covered_chapters=covered_chaps,
             include_source=True,
             include_knowledge_dim=True,
+            include_answers=include_answers,
+            include_totals=add_totals,
+            totals_summary=totals_summary,
         )
         pdf_data = create_pdf_exam_paper(
             questions=questions,
@@ -749,6 +957,9 @@ if st.session_state.results:
             covered_chapters=covered_chaps,
             include_source=True,
             include_knowledge_dim=True,
+            include_answers=include_answers,
+            include_totals=add_totals,
+            totals_summary=totals_summary,
         )
         csv_data = df.to_csv(index=False).encode("utf-8")
 
