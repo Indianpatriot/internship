@@ -1,23 +1,59 @@
 """Export utilities for generating professional DOCX and PDF question papers.
 
-Implements Paper Assembly & Export:
+Implements Paper Assembly & Export (Step 2 of UI and Export requirements):
+- Substep 2.1: Show answers in DOCX/PDF, including the OR format (choice questions and answer alternatives).
+- Substep 2.2: Add the optional totals table at the end (Course Outcomes and Bloom's Taxonomy cumulative totals).
 - Table layout: (S.No, Question Text, Marks, BT (Cognitive), Knowledge Dimension (KD), CO, [Source])
-- Section grouping (Part A: 10 Marks, Part B: 40 Marks)
+- Section grouping (Part A: 10 Marks, Part B: 40 Marks, Units with choice questions)
 - Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
-- Revised Bloom's Taxonomy (Cognitive & Knowledge dimensions) & Course Outcome reference tables
 """
 import io
+from typing import Any, Optional
+
 import docx
-from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
+from docx.shared import Inches, Pt, RGBColor
 
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+
+def _split_answer_alternatives(q: dict[str, Any]) -> list[str]:
+    """Extract distinct answer alternatives from QuestionRecord."""
+    if q.get("answer_alternatives") and isinstance(q["answer_alternatives"], list):
+        return [str(a).strip() for a in q["answer_alternatives"] if str(a).strip()]
+
+    raw_ans = q.get("answer", "")
+    if not raw_ans:
+        return []
+
+    # Check for text with 'OR' on its own line
+    lines = raw_ans.splitlines()
+    alts: list[str] = []
+    curr: list[str] = []
+    for line in lines:
+        if line.strip() == "OR":
+            if curr:
+                alts.append("\n".join(curr).strip())
+                curr = []
+        else:
+            curr.append(line)
+    if curr:
+        alts.append("\n".join(curr).strip())
+
+    return alts if len(alts) > 1 else [raw_ans.strip()]
 
 
 def create_docx_exam_paper(
@@ -29,10 +65,14 @@ def create_docx_exam_paper(
     covered_chapters: list[str] = None,
     include_source: bool = True,
     include_knowledge_dim: bool = True,
+    include_answers: bool = True,
+    include_totals: bool = True,
+    totals_summary: Optional[dict[str, Any]] = None,
 ) -> bytes:
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
-    Produces table layout with Revised Bloom's Taxonomy (Cognitive and Knowledge dimensions).
+    Produces table layout with Revised Bloom's Taxonomy, OR choice formatting,
+    optional model answers, and optional cumulative totals tables at the end.
     """
     doc = docx.Document()
 
@@ -95,8 +135,14 @@ def create_docx_exam_paper(
     inst_r1 = inst_p.add_run("Instructions to Candidates:\n")
     inst_r1.bold = True
     inst_r1.font.size = Pt(10)
+    has_choices = any(q.get("alternative_group") for q in questions)
+    inst_choice_text = (
+        "Answer ONE full question from each unit (Internal Choice marked with OR)."
+        if has_choices
+        else "Answer all questions."
+    )
     inst_r2 = inst_p.add_run(
-        "1. Answer all questions.\n"
+        f"1. {inst_choice_text}\n"
         "2. Figures indicate allocated Marks, Cognitive Bloom's Level (BT), Knowledge Dimension (KD), and Course Outcome (CO).\n"
         "3. Read each question carefully before attempting."
     )
@@ -105,7 +151,7 @@ def create_docx_exam_paper(
     doc.add_paragraph("")
 
     # 3. Main Question Table
-    has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
+    has_source = include_source and any(q.get("chapter") or q.get("page_start") or q.get("page") for q in questions)
     has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
 
     if has_kd and has_source:
@@ -145,6 +191,7 @@ def create_docx_exam_paper(
 
     has_parts = any("part" in q for q in questions)
     current_part = None
+    prev_q: Optional[dict[str, Any]] = None
 
     for q in questions:
         q_part = q.get("part")
@@ -168,6 +215,30 @@ def create_docx_exam_paper(
 
             shading = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
             merged_cell._tc.get_or_add_tcPr().append(shading)
+
+        # Substep 2.1: Check for OR format between choice questions
+        if prev_q:
+            prev_grp = prev_q.get("alternative_group")
+            curr_grp = q.get("alternative_group")
+            if (
+                prev_grp
+                and curr_grp
+                and prev_grp == curr_grp
+                and prev_q.get("question_no") != q.get("question_no")
+            ):
+                or_row = q_table.add_row()
+                or_cell = or_row.cells[0]
+                for c in or_row.cells[1:]:
+                    or_cell.merge(c)
+                or_cell.text = "— OR —"
+                p = or_cell.paragraphs[0]
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for r in p.runs:
+                    r.bold = True
+                    r.font.size = Pt(10)
+                    r.font.color.rgb = RGBColor(0xDC, 0x26, 0x26)
+                shading = parse_xml(r'<w:shd {} w:fill="FEF2F2"/>'.format(nsdecls("w")))
+                or_cell._tc.get_or_add_tcPr().append(shading)
 
         row_cells = q_table.add_row().cells
         for cell, w in zip(row_cells, t_widths):
@@ -201,7 +272,7 @@ def create_docx_exam_paper(
 
         if has_source:
             ch = q.get("chapter", "")
-            p_s = q.get("page_start", "")
+            p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
             src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
             row_cells[col_idx].text = src_str
@@ -211,6 +282,8 @@ def create_docx_exam_paper(
             for p in cell.paragraphs:
                 for r in p.runs:
                     r.font.size = Pt(9.0)
+
+        prev_q = q
 
     # 4. Reference Section: Course Outcomes & Revised Bloom's Taxonomy
     if outcomes:
@@ -231,6 +304,197 @@ def create_docx_exam_paper(
     bt_run.font.size = Pt(8.5)
     bt_run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
 
+    # 5. Substep 2.1: Model Answers & Scheme of Evaluation Section (including OR format)
+    has_any_answers = include_answers and any(q.get("answer") for q in questions)
+    if has_any_answers:
+        doc.add_page_break()
+        ans_heading = doc.add_paragraph()
+        ans_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        ans_run = ans_heading.add_run("SCHEME OF EVALUATION & MODEL ANSWERS\n")
+        ans_run.bold = True
+        ans_run.font.size = Pt(14)
+        ans_run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
+
+        sub_ans = ans_heading.add_run(f"Subject: {course_name} ({subject_code})")
+        sub_ans.bold = True
+        sub_ans.font.size = Pt(10.5)
+
+        doc.add_paragraph("―" * 58).alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        prev_ans_q: Optional[dict[str, Any]] = None
+        for q in questions:
+            # Check for choice group separator between distinct questions
+            if prev_ans_q:
+                prev_grp = prev_ans_q.get("alternative_group")
+                curr_grp = q.get("alternative_group")
+                if (
+                    prev_grp
+                    and curr_grp
+                    and prev_grp == curr_grp
+                    and prev_ans_q.get("question_no") != q.get("question_no")
+                ):
+                    or_p = doc.add_paragraph()
+                    or_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    or_r = or_p.add_run("― OR ―")
+                    or_r.bold = True
+                    or_r.font.size = Pt(11)
+                    or_r.font.color.rgb = RGBColor(0xDC, 0x26, 0x26)
+
+            q_id = q.get("id", "")
+            q_txt = q.get("question", "")
+            q_marks = q.get("marks", "")
+            q_lvl = q.get("level", "")
+            q_co = q.get("co", "")
+
+            qp = doc.add_paragraph()
+            q_run = qp.add_run(f"Question {q_id}: {q_txt} [{q_marks} Marks]\n")
+            q_run.bold = True
+            q_run.font.size = Pt(10)
+            meta_r = qp.add_run(f"Target: {q_lvl} | Course Outcome: {q_co}")
+            meta_r.italic = True
+            meta_r.font.size = Pt(8.5)
+            meta_r.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+
+            alternatives = _split_answer_alternatives(q)
+            if len(alternatives) > 1:
+                # Substep 2.1: Render answer alternatives in OR format
+                for a_idx, alt in enumerate(alternatives, 1):
+                    ap = doc.add_paragraph()
+                    a_label = ap.add_run(f"Model Answer Alternative {a_idx}:\n")
+                    a_label.bold = True
+                    a_label.font.size = Pt(9.5)
+                    a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+                    ap.add_run(alt).font.size = Pt(9.0)
+
+                    if a_idx < len(alternatives):
+                        sep_p = doc.add_paragraph()
+                        sep_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        sep_r = sep_p.add_run("— OR —")
+                        sep_r.bold = True
+                        sep_r.font.size = Pt(9.5)
+                        sep_r.font.color.rgb = RGBColor(0x25, 0x63, 0xEB)
+            elif alternatives:
+                ap = doc.add_paragraph()
+                a_label = ap.add_run("Model Answer / Key Points:\n")
+                a_label.bold = True
+                a_label.font.size = Pt(9.5)
+                a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+                ap.add_run(alternatives[0]).font.size = Pt(9.0)
+            else:
+                doc.add_paragraph("Model answer pending evaluation.").italic = True
+
+            doc.add_paragraph("")
+            prev_ans_q = q
+
+    # 6. Substep 2.2: Add optional totals table at the end
+    if include_totals:
+        from totals import summarize, totals_table_rows
+
+        summary = totals_summary or summarize(questions, attempted_only=True)
+        table_rows_dict = totals_table_rows(summary)
+        co_rows = table_rows_dict.get("co_table", [])
+        bt_rows = table_rows_dict.get("bt_table", [])
+
+        doc.add_page_break()
+        tot_heading = doc.add_paragraph()
+        tot_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        tot_run = tot_heading.add_run("CUMULATIVE COURSE OUTCOME (CO) & BLOOM'S TAXONOMY (BT) TOTALS\n")
+        tot_run.bold = True
+        tot_run.font.size = Pt(13)
+        tot_run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
+
+        sub_tot = tot_heading.add_run(
+            f"Attempted Marks: {summary.get('total_marks', 0)} | "
+            f"Offered Marks: {summary.get('offered_marks', 0)}"
+        )
+        sub_tot.bold = True
+        sub_tot.font.size = Pt(9.5)
+        sub_tot.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+
+        doc.add_paragraph("―" * 58).alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Table 1: Course Outcomes Totals Table
+        if co_rows:
+            p_co = doc.add_paragraph()
+            r_co = p_co.add_run("1. Course Outcomes (CO) Distribution:")
+            r_co.bold = True
+            r_co.font.size = Pt(10)
+
+            t_co = doc.add_table(rows=len(co_rows), cols=len(co_rows[0]))
+            t_co.alignment = WD_TABLE_ALIGNMENT.CENTER
+            t_co.autofit = False
+
+            co_col_widths = [Inches(2.5), Inches(1.3), Inches(1.4), Inches(1.5)]
+            for r_idx, row_data in enumerate(co_rows):
+                row_cells = t_co.rows[r_idx].cells
+                is_hdr = (r_idx == 0)
+                is_total = (r_idx == len(co_rows) - 1)
+
+                for c_idx, val in enumerate(row_data):
+                    cell = row_cells[c_idx]
+                    cell.width = co_col_widths[c_idx]
+                    cell.text = str(val)
+                    p = cell.paragraphs[0]
+                    if c_idx > 0:
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                    for r in p.runs:
+                        r.font.size = Pt(9.0)
+                        if is_hdr:
+                            r.bold = True
+                            r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                        elif is_total:
+                            r.bold = True
+
+                    if is_hdr:
+                        shd = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+                    elif is_total:
+                        shd = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+
+            doc.add_paragraph("")
+
+        # Table 2: Bloom's Taxonomy Totals Table
+        if bt_rows:
+            p_bt = doc.add_paragraph()
+            r_bt = p_bt.add_run("2. Bloom's Taxonomy (BT) Cognitive Distribution:")
+            r_bt.bold = True
+            r_bt.font.size = Pt(10)
+
+            t_bt = doc.add_table(rows=len(bt_rows), cols=len(bt_rows[0]))
+            t_bt.alignment = WD_TABLE_ALIGNMENT.CENTER
+            t_bt.autofit = False
+
+            bt_col_widths = [Inches(2.5), Inches(1.3), Inches(1.4), Inches(1.5)]
+            for r_idx, row_data in enumerate(bt_rows):
+                row_cells = t_bt.rows[r_idx].cells
+                is_hdr = (r_idx == 0)
+                is_total = (r_idx == len(bt_rows) - 1)
+
+                for c_idx, val in enumerate(row_data):
+                    cell = row_cells[c_idx]
+                    cell.width = bt_col_widths[c_idx]
+                    cell.text = str(val)
+                    p = cell.paragraphs[0]
+                    if c_idx > 0:
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                    for r in p.runs:
+                        r.font.size = Pt(9.0)
+                        if is_hdr:
+                            r.bold = True
+                            r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                        elif is_total:
+                            r.bold = True
+
+                    if is_hdr:
+                        shd = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+                    elif is_total:
+                        shd = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -245,8 +509,15 @@ def create_pdf_exam_paper(
     covered_chapters: list[str] = None,
     include_source: bool = True,
     include_knowledge_dim: bool = True,
+    include_answers: bool = True,
+    include_totals: bool = True,
+    totals_summary: Optional[dict[str, Any]] = None,
 ) -> bytes:
-    """Generate a formatted PDF exam question paper using ReportLab."""
+    """Generate a formatted PDF exam question paper using ReportLab.
+
+    Produces table layout with Revised Bloom's Taxonomy, OR choice formatting,
+    optional model answers, and optional cumulative totals tables at the end.
+    """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -316,6 +587,32 @@ def create_pdf_exam_paper(
         textColor=colors.HexColor("#1E3A8A"),
         fontName="Helvetica-Bold",
     )
+    or_style = ParagraphStyle(
+        "OrChoiceCell",
+        parent=styles["Normal"],
+        fontSize=9.5,
+        leading=13,
+        alignment=1,
+        textColor=colors.HexColor("#DC2626"),
+        fontName="Helvetica-Bold",
+    )
+    ans_text_style = ParagraphStyle(
+        "AnswerText",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11.5,
+        textColor=colors.HexColor("#1E293B"),
+        fontName="Helvetica",
+    )
+    ans_or_sep_style = ParagraphStyle(
+        "AnswerOrSep",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+        alignment=1,
+        textColor=colors.HexColor("#2563EB"),
+        fontName="Helvetica-Bold",
+    )
 
     elements = []
     elements.append(Paragraph(institution_name.upper(), title_style))
@@ -350,9 +647,15 @@ def create_pdf_exam_paper(
 
     # Instructions
     elements.append(Paragraph("<b>Instructions to Candidates:</b>", styles["Normal"]))
+    has_choices = any(q.get("alternative_group") for q in questions)
+    inst_choice_text = (
+        "Answer ONE full question from each unit (Internal Choice marked with OR)."
+        if has_choices
+        else "Answer all questions."
+    )
     elements.append(
         Paragraph(
-            "1. Answer all questions.<br/>"
+            f"1. {inst_choice_text}<br/>"
             "2. Figures indicate allocated Marks, Cognitive Bloom's Level (BT), Knowledge Dimension (KD), and Course Outcome (CO).<br/>"
             "3. Read each question carefully before attempting.",
             styles["Normal"],
@@ -360,7 +663,7 @@ def create_pdf_exam_paper(
     )
     elements.append(Spacer(1, 10))
 
-    has_source = include_source and any(q.get("chapter") or q.get("page_start") for q in questions)
+    has_source = include_source and any(q.get("chapter") or q.get("page_start") or q.get("page") for q in questions)
     has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
 
     if has_kd and has_source:
@@ -408,6 +711,8 @@ def create_pdf_exam_paper(
     has_parts = any("part" in q for q in questions)
     current_part = None
     part_rows_indices = []
+    or_rows_indices = []
+    prev_q: Optional[dict[str, Any]] = None
 
     for q in questions:
         q_part = q.get("part")
@@ -424,6 +729,24 @@ def create_pdf_exam_paper(
                 *empty_cells,
             ])
 
+        # Substep 2.1: Check for OR choice format between choice questions
+        if prev_q:
+            prev_grp = prev_q.get("alternative_group")
+            curr_grp = q.get("alternative_group")
+            if (
+                prev_grp
+                and curr_grp
+                and prev_grp == curr_grp
+                and prev_q.get("question_no") != q.get("question_no")
+            ):
+                or_idx = len(table_data)
+                or_rows_indices.append(or_idx)
+                empty_cells = [""] * (len(col_widths) - 1)
+                table_data.append([
+                    Paragraph("— OR —", or_style),
+                    *empty_cells,
+                ])
+
         row = [
             Paragraph(str(q.get("id", "")), q_bold_cell),
             Paragraph(str(q.get("question", "")), q_cell_style),
@@ -439,12 +762,13 @@ def create_pdf_exam_paper(
 
         if has_source:
             ch = q.get("chapter", "")
-            p_s = q.get("page_start", "")
+            p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
             src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
             row.append(Paragraph(src_str, q_cell_style))
 
         table_data.append(row)
+        prev_q = q
 
     t_style = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
@@ -460,6 +784,11 @@ def create_pdf_exam_paper(
     for p_idx in part_rows_indices:
         t_style.append(("SPAN", (0, p_idx), (-1, p_idx)))
         t_style.append(("BACKGROUND", (0, p_idx), (-1, p_idx), colors.HexColor("#F1F5F9")))
+
+    for or_idx in or_rows_indices:
+        t_style.append(("SPAN", (0, or_idx), (-1, or_idx)))
+        t_style.append(("BACKGROUND", (0, or_idx), (-1, or_idx), colors.HexColor("#FEF2F2")))
+        t_style.append(("ALIGN", (0, or_idx), (-1, or_idx), "CENTER"))
 
     q_table = Table(table_data, colWidths=col_widths)
     q_table.setStyle(TableStyle(t_style))
@@ -479,6 +808,111 @@ def create_pdf_exam_paper(
             styles["Normal"],
         )
     )
+
+    # 5. Substep 2.1: Model Answers Section in PDF
+    has_any_answers = include_answers and any(q.get("answer") for q in questions)
+    if has_any_answers:
+        elements.append(PageBreak())
+        elements.append(Paragraph("SCHEME OF EVALUATION & MODEL ANSWERS", title_style))
+        elements.append(Paragraph(f"Subject: {course_name} ({subject_code})", sub_style))
+        elements.append(Spacer(1, 10))
+
+        prev_ans_q: Optional[dict[str, Any]] = None
+        for q in questions:
+            if prev_ans_q:
+                prev_grp = prev_ans_q.get("alternative_group")
+                curr_grp = q.get("alternative_group")
+                if (
+                    prev_grp
+                    and curr_grp
+                    and prev_grp == curr_grp
+                    and prev_ans_q.get("question_no") != q.get("question_no")
+                ):
+                    elements.append(Paragraph("<b>— OR —</b>", or_style))
+                    elements.append(Spacer(1, 4))
+
+            q_id = q.get("id", "")
+            q_txt = q.get("question", "")
+            q_marks = q.get("marks", "")
+            q_lvl = q.get("level", "")
+            q_co = q.get("co", "")
+
+            q_banner = f"<b>Question {q_id}:</b> {q_txt} [<b>{q_marks} Marks</b>] <i>({q_lvl}, {q_co})</i>"
+            elements.append(Paragraph(q_banner, styles["Normal"]))
+            elements.append(Spacer(1, 2))
+
+            alternatives = _split_answer_alternatives(q)
+            if len(alternatives) > 1:
+                for a_idx, alt in enumerate(alternatives, 1):
+                    elements.append(Paragraph(f"<b>Answer Alternative {a_idx}:</b>", ans_text_style))
+                    elements.append(Paragraph(alt.replace("\n", "<br/>"), ans_text_style))
+                    if a_idx < len(alternatives):
+                        elements.append(Paragraph("— OR —", ans_or_sep_style))
+            elif alternatives:
+                elements.append(Paragraph("<b>Model Answer / Key Points:</b>", ans_text_style))
+                elements.append(Paragraph(alternatives[0].replace("\n", "<br/>"), ans_text_style))
+
+            elements.append(Spacer(1, 8))
+            prev_ans_q = q
+
+    # 6. Substep 2.2: Cumulative Totals Tables in PDF
+    if include_totals:
+        from totals import summarize, totals_table_rows
+
+        summary = totals_summary or summarize(questions, attempted_only=True)
+        table_rows_dict = totals_table_rows(summary)
+        co_rows = table_rows_dict.get("co_table", [])
+        bt_rows = table_rows_dict.get("bt_table", [])
+
+        elements.append(PageBreak())
+        elements.append(Paragraph("CUMULATIVE CO & BT TOTALS", title_style))
+        elements.append(
+            Paragraph(
+                f"Attempted Marks: {summary.get('total_marks', 0)} | "
+                f"Offered Marks: {summary.get('offered_marks', 0)}",
+                sub_style,
+            )
+        )
+        elements.append(Spacer(1, 10))
+
+        # Render CO table
+        if co_rows:
+            elements.append(Paragraph("<b>1. Course Outcomes (CO) Distribution:</b>", styles["Normal"]))
+            elements.append(Spacer(1, 4))
+            co_flow_data = [
+                [Paragraph(str(c), hdr_style if r_i == 0 else (q_bold_cell if r_i == len(co_rows) - 1 else q_cell_style))
+                 for c in row]
+                for r_i, row in enumerate(co_rows)
+            ]
+            t_co = Table(co_flow_data, colWidths=[180, 100, 110, 110])
+            t_co.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            elements.append(t_co)
+            elements.append(Spacer(1, 10))
+
+        # Render BT table
+        if bt_rows:
+            elements.append(Paragraph("<b>2. Bloom's Taxonomy (BT) Cognitive Distribution:</b>", styles["Normal"]))
+            elements.append(Spacer(1, 4))
+            bt_flow_data = [
+                [Paragraph(str(c), hdr_style if r_i == 0 else (q_bold_cell if r_i == len(bt_rows) - 1 else q_cell_style))
+                 for c in row]
+                for r_i, row in enumerate(bt_rows)
+            ]
+            t_bt = Table(bt_flow_data, colWidths=[180, 100, 110, 110])
+            t_bt.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            elements.append(t_bt)
 
     doc.build(elements)
     return buf.getvalue()
