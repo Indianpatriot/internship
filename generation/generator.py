@@ -509,10 +509,10 @@ def generate_paper_by_slots(
         slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
         slot_rejected = []
 
-        # Bound retries: at most 2 retries (up to 3 candidate chunks tested per slot)
-        max_chunk_tries = min(len(pool), 3)
-        for chunk_idx in range(max_chunk_tries):
-            chunk = pool[chunk_idx]
+        # Bounded retries: max 2 retries per failing slot (up to 3 attempts total)
+        max_slot_tries = min(max(len(pool), 1) * 2, 3)
+        for attempt_i in range(max_slot_tries):
+            chunk = pool[attempt_i % len(pool)]
             if not is_content_chunk(chunk):
                 continue
             try:

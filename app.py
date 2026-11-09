@@ -737,9 +737,6 @@ with col_p1:
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
-            st.rerun()
-        except ValueError as e:
-            st.error(str(e))
 
 
 with col_p2:
