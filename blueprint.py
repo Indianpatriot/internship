@@ -479,9 +479,9 @@ def build_blueprint(
         "L1": ["Factual", "Conceptual"],
         "L2": ["Conceptual", "Factual"],
         "L3": ["Procedural", "Conceptual"],
-        "L4": ["Procedural", "Conceptual"],
-        "L5": ["Metacognitive", "Procedural"],
-        "L6": ["Metacognitive", "Procedural"],
+        "L4": ["Conceptual", "Procedural"],
+        "L5": ["Conceptual", "Procedural", "Metacognitive"],
+        "L6": ["Conceptual", "Procedural", "Metacognitive"],
     }
 
     for s in sorted_slots:
@@ -489,15 +489,31 @@ def build_blueprint(
         u = s["unit"]
 
         # Select BT Band with largest remaining deficit
-        # Deficit = target - allocated
+        # Constraints:
+        # Slots with marks <= 3 MUST NOT be allocated L5 or L6
+        valid_bands = [b for b in BT_BANDS if not (m <= 3 and b == "L5-L6")]
+        if not valid_bands:
+            valid_bands = BT_BANDS
+
         best_band = max(
-            BT_BANDS,
+            valid_bands,
             key=lambda b: (target_bt[b] - allocated_bt[b], -allocated_bt[b]),
         )
         allocated_bt[best_band] += m
-        lvl_idx = band_level_alternation[best_band]
-        assigned_level = BAND_LEVELS[best_band][lvl_idx]
-        band_level_alternation[best_band] = (lvl_idx + 1) % len(BAND_LEVELS[best_band])
+
+        # Slots with marks >= 10 MUST NOT be allocated L1 (Remember)
+        if best_band == "L1-L2":
+            if m >= 10:
+                assigned_level = "L2"
+            else:
+                lvl_idx = band_level_alternation[best_band]
+                assigned_level = BAND_LEVELS[best_band][lvl_idx]
+                band_level_alternation[best_band] = (lvl_idx + 1) % len(BAND_LEVELS[best_band])
+        else:
+            lvl_idx = band_level_alternation[best_band]
+            assigned_level = BAND_LEVELS[best_band][lvl_idx]
+            band_level_alternation[best_band] = (lvl_idx + 1) % len(BAND_LEVELS[best_band])
+
         s["level"] = assigned_level
         s["_band"] = best_band
 

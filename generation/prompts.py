@@ -9,7 +9,8 @@ Using ONLY the context below, write exactly ONE high-quality, clear, sensible {n
 The question MUST start with one of these verbs: {verbs}.
 Rules:
 - Use only facts present in the context. Do not use outside knowledge.
-- Do not mention "the context", "the passage", "the text", "the diagram", "the author", or "the tutorial" in the question.
+- Do not mention "the context", "the passage", "the text", "the book", "this book", "this text", "the chapter", "the author", "the tutorial", "Chapter", "Figure", "Table", "Section", or "target audience" in the question.
+- The question must be a completely SELF-CONTAINED university exam question testing the technical concept, definition, algorithm, or mechanism.
 - Focus purely on core technical concepts, definitions, algorithms, or mechanisms. The question must be realistic and complete.
 - {hint}{kd_hint}{marks}
 - Output only the question text ending with '?'. No numbering, no preamble, no answer.
@@ -66,10 +67,10 @@ Provide an authoritative model answer for the exam question below using ONLY the
 
 Rules:
 - Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text.
-- Give one primary, comprehensive model answer.
+- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated"), and do not invent contradictory alternatives. Write the exact answer an examiner expects.
 - Target answer length: approximately {target_words} words (appropriate for a {marks}-mark question).
-- If the question genuinely admits more than one acceptable or alternative answer, provide each alternative after a separate line containing only "OR".
-- Output only the model answer text (and "OR" lines between distinct valid alternatives). No conversational preamble, no greetings, no markdown fences.
+- If multiple valid approaches exist, label them clearly with "Alternative approach:". NEVER use "OR" or "― OR ―" inside the answer text.
+- Output only the model answer text. No conversational preamble, no greetings, no markdown fences.
 
 Context:
 \"\"\"

@@ -121,13 +121,23 @@ FRONT_MATTER_MARKERS = [
     (r"\b(isbn(?:-1[03])?:?\s*[0-9-x]+)\b", "isbn_metadata"),
     (r"\b(all\s+rights\s+reserved)\b", "all_rights_reserved"),
     (r"\b(copyright\s*(?:©|\(c\)|20\d\d|19\d\d)?)\b", "copyright_notice"),
-    (r"\b(acknowledgements?)\b", "acknowledgements"),
+    (r"\b(acknowledgements?|acknowledgments?)\b", "acknowledgements"),
     (r"\b(preface)\b", "preface"),
     (r"\b(foreword)\b", "foreword"),
     (r"\b(dedication|dedicated\s+to)\b", "dedication"),
     (r"\b(table\s+of\s+contents|brief\s+contents|contents)\b", "table_of_contents"),
     (r"\b(list\s+of\s+figures|list\s+of\s+tables|list\s+of\s+illustrations)\b", "list_of_figures_or_tables"),
     (r"\b(about\s+the\s+authors?|author\s+biograph(?:y|ies))\b", "about_the_author"),
+    (r"\b(about\s+this\s+book)\b", "about_this_book"),
+    (r"\b(about\s+the\s+cover(?:\s+illustration)?)\b", "about_the_cover"),
+    (r"\b(about\s+the\s+technical\s+(?:editor|reviewer)s?|about\s+the\s+reviewers?)\b", "about_the_reviewers"),
+    (r"^\s*(?:welcome)\b", "welcome"),
+    (r"\b(to\s+get\s+the\s+most\s+out\s+of\s+this\s+book)\b", "get_the_most_out_of_book"),
+    (r"\b(conventions\s+used\s+in\s+this\s+book)\b", "conventions_used"),
+    (r"^\s*(?:conventions\s+used)\b", "conventions_used"),
+    (r"\b(get\s+in\s+touch)\b", "get_in_touch"),
+    (r"\b(other\s+books\s+you\s+may\s+enjoy)\b", "other_books"),
+    (r"^\s*(?:reviews)\b", "reviews"),
 ]
 
 # Back-matter keyword markers
@@ -136,7 +146,8 @@ BACK_MATTER_MARKERS = [
     (r"\b(bibliograph(?:y|ies))\b", "bibliography"),
     (r"\b(references|suggested\s+readings?|further\s+readings?)\b", "references"),
     (r"\b(glossar(?:y|ies))\b", "glossary"),
-    (r"\b(answers\s+to\s+(?:selected\s+)?(?:exercises|problems))\b", "answers_to_exercises"),
+    (r"\b(answers\s+to\s+(?:selected\s+)?(?:exercises|problems|questions))\b", "answers_to_exercises"),
+    (r"^\s*(?:assessments?|answers)\b", "assessments"),
 ]
 
 # Chapter-end / content protection markers (Safety Rule 3)
@@ -147,7 +158,7 @@ CONTENT_PROTECTION_PATTERNS = [
 ]
 
 # Structural TOC / Index indicators
-DOT_LEADER_RE = re.compile(r"(\.{2,}|\b)\s*\d+$")
+DOT_LEADER_RE = re.compile(r"\.{2,}\s*\d+$|\s{3,}\d+$")
 INDEX_ENTRY_RE = re.compile(r"^[\w\s\-\(\)]+,\s*\d+(?:\s*,\s*\d+)*")
 
 

@@ -14,7 +14,7 @@ import threading
 from typing import Any, Optional
 
 from blooms.revised_taxonomy import normalize_knowledge_dimension
-from blooms.verb_bank import first_word, normalize_level, sample_verbs, validate_question
+from blooms.verb_bank import first_word, get_verbs, normalize_level, sample_verbs, validate_question
 from config import (
     ANSWER_MIN_SIMILARITY,
     GENERATION_WORKERS,
@@ -23,7 +23,144 @@ from config import (
 )
 from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_answer_prompt, build_prompt
-from retrieval.sources import select_chunks_for_unit
+from retrieval.sources import is_content_chunk, select_chunks_for_unit
+
+DANGLING_ENDINGS = {
+    "and", "the", "with", "impl", "ho", "availab", "by", "to", "or", "of", "in", "on",
+    "at", "for", "from", "as", "is", "are", "a", "an", "that", "this", "which", "into",
+    "onto", "be", "been", "being", "have", "has", "had", "do", "does", "did", "but",
+    "so", "if", "because", "while", "where", "when", "how", "what", "who",
+}
+
+TERMINAL_PUNCTUATION = (".", "!", "?", '."', ".'", '!"', "!'", '?"', "?'", "```", ")", "]", "}")
+
+TEXTBOOK_REF_PATTERNS = [
+    r"\b(this|the)\s+(book|text|chapter|section|author|authors|passage|diagram above|diagram below|figure\s*\d|table\s*\d)\b",
+    r"\bchapter\s+\d+\b",
+    r"\bfigure\s*\d+(?:\.\d+)?\b",
+    r"\btable\s*\d+(?:\.\d+)?\b",
+    r"\btarget\s+audience\b",
+    r"\baim\s+of\s+chapter\b",
+    r"\bas\s+described\s+in\b",
+    r"\baccording\s+to\s+(?:the\s+author|the\s+text|the\s+book|chapter)\b",
+    r"\bcovered\s+in\s+chapter\b",
+    r"\bmentioned\s+in\s+chapter\b",
+    r"\blook\s+at\s+(?:the\s+)?(?:diagram|figure|table)\b",
+]
+TEXTBOOK_REF_RE = re.compile("|".join(TEXTBOOK_REF_PATTERNS), re.I)
+
+BANNED_ANSWER_PATTERNS = [
+    r"\bthe\s+text\s+does\s+not\b",
+    r"\bthe\s+provided\s+text\b",
+    r"\bnot\s+explicitly\s+mentioned\b",
+    r"\bbased\s+on\s+general\s+knowledge\b",
+    r"\bcannot\s+be\s+answered\b",
+    r"\bthe\s+passage\s+doesn'?t\b",
+    r"\bnot\s+mentioned\s+in\s+the\b",
+    r"\bdoes\s+not\s+provide\b",
+    r"\bnot\s+specified\s+in\s+the\b",
+    r"\blacks\s+information\b",
+]
+BANNED_ANSWER_RE = re.compile("|".join(BANNED_ANSWER_PATTERNS), re.I)
+
+
+def is_truncated_text(text: str, is_question: bool = False) -> bool:
+    """Return True if text appears truncated (cut off mid-sentence or mid-word)."""
+    s = (text or "").strip()
+    if not s:
+        return True
+    if is_question:
+        if not s.endswith(("?", '?"', "?'")):
+            return True
+        last_word = re.sub(r"[^\w]", "", s.split()[-1].lower())
+        if last_word in DANGLING_ENDINGS:
+            return True
+        return False
+
+    ends_punct = any(s.endswith(p) for p in TERMINAL_PUNCTUATION)
+    if not ends_punct:
+        return True
+    words = s.split()
+    if words:
+        last_word = re.sub(r"[^\w]", "", words[-1].lower())
+        if last_word in DANGLING_ENDINGS:
+            return True
+    return False
+
+
+def truncate_to_last_complete_sentence(text: str) -> str:
+    """Fallback: truncate to the last sentence ending with terminal punctuation."""
+    s = (text or "").strip()
+    matches = list(re.finditer(r"[\.!\?]+(?:\s+|$)", s))
+    if matches:
+        last_end = matches[-1].end()
+        return s[:last_end].strip()
+    return s
+
+
+def has_textbook_reference(text: str) -> bool:
+    """Check if text refers to physical textbook rather than concept."""
+    return bool(TEXTBOOK_REF_RE.search(text or ""))
+
+
+def has_banned_answer_phrases(text: str) -> bool:
+    """Check if model answer contains meta commentary or apology phrases."""
+    return bool(BANNED_ANSWER_RE.search(text or ""))
+
+
+def clean_answer_text(text: str) -> tuple[str, list[str]]:
+    """Clean model answer: replace '― OR ―' and 'OR' with 'Alternative approach:'.
+
+    Ensures ONE authoritative model answer or distinct alternative approaches.
+    Never leaves '― OR ―' inside answer text.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", []
+
+    lines = raw.splitlines()
+    cur_buf: list[str] = []
+    alternatives: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^(?:[—―\-]+\s*)?OR(?:\s*[—―\-]+)?[:\.]?$", stripped, re.I):
+            alt_text = "\n".join(cur_buf).strip()
+            if alt_text:
+                alternatives.append(alt_text)
+            cur_buf = []
+        elif re.match(r"^Alternative approach(?:\s*\d+)?[:\.]?", stripped, re.I):
+            alt_text = "\n".join(cur_buf).strip()
+            if alt_text:
+                alternatives.append(alt_text)
+            content_after = re.sub(r"^Alternative approach(?:\s*\d+)?[:\.]?\s*", "", stripped, flags=re.I).strip()
+            cur_buf = [content_after] if content_after else []
+        else:
+            cur_buf.append(line)
+
+    if cur_buf:
+        alt_text = "\n".join(cur_buf).strip()
+        if alt_text:
+            alternatives.append(alt_text)
+
+    if not alternatives:
+        alternatives = [raw]
+
+    unique_alts: list[str] = []
+    for a in alternatives:
+        # Strip any internal '― OR ―'
+        a_clean = re.sub(r"^[—―-]+\s*OR\s*[—―-]+$", "", a, flags=re.I | re.M).strip()
+        a_clean = re.sub(r"[—―-]+\s*OR\s*[—―-]+", "Alternative approach:", a_clean, flags=re.I).strip()
+        if a_clean and a_clean not in unique_alts:
+            unique_alts.append(a_clean)
+
+    if len(unique_alts) > 1:
+        full = unique_alts[0] + "\n\n" + "\n\n".join(f"Alternative approach:\n{a}" for a in unique_alts[1:])
+    else:
+        full = unique_alts[0] if unique_alts else raw
+
+    full = re.sub(r"[—―]+\s*OR\s*[—―]+", "Alternative approach:", full, flags=re.I)
+    return full.strip(), unique_alts
 
 
 def clean_output(raw: str) -> str:
@@ -66,41 +203,73 @@ def generate_question(
     rng = rng or random.Random()
     kd = normalize_knowledge_dimension(knowledge_dimension) if knowledge_dimension else None
     context = " ".join(chunk["text"].split()[:MAX_CONTEXT_WORDS])
+    has_numbers = bool(re.search(r"\b\d+(?:\.\d+)?\b", context))
     q, reason, attempts = "", "no output", 0
     ok = False
-    
-    num_predict = min(80, max(45, (marks or 5) * 8))
+
+    # Problem 4: Raise num_predict for questions to 250-500
+    num_predict = max(250, min(500, (marks or 5) * 40))
     client_model = getattr(client, "model", "llama3.1:8b")
 
     for attempts in range(1, max_retries + 1):
         verbs = sample_verbs(level, k_verbs, rng)
+        if not has_numbers:
+            verbs = [v for v in verbs if v.lower() not in ("compute", "calculate")]
+            if not verbs:
+                all_v = get_verbs(level)
+                verbs = [v for v in all_v if v.lower() not in ("compute", "calculate")]
+                verbs = rng.sample(verbs, min(k_verbs, len(verbs))) if verbs else sample_verbs(level, k_verbs, rng)
+
         prompt = build_prompt(context, level, verbs, marks=marks, knowledge_dimension=kd)
         temp = min(0.3 + 0.2 * (attempts - 1), 0.9)
-        
+
         cached = get_cached_response(prompt, client_model, temperature=temp, force_regenerate=force_regenerate)
         if cached:
             raw = cached
         else:
             raw = client.generate(prompt, temperature=temp, num_predict=num_predict)
-            
+
         q = clean_output(raw)
         ok, reason = validate_question(q, level)
+        if ok and has_textbook_reference(q):
+            ok = False
+            reason = "question contains textbook references"
+        if ok and is_truncated_text(q, is_question=True):
+            ok = False
+            reason = "question is truncated"
+        if ok and not has_numbers and first_word(q) in ("compute", "calculate"):
+            ok = False
+            reason = "compute/calculate verb in non-numerical context"
+
         if ok:
-            if not cached:
+            if not cached and not is_truncated_text(q, is_question=True):
                 store_cached_response(prompt, client_model, raw, temperature=temp)
             break
         elif attempts < max_retries:
             verbs = sample_verbs(level, k_verbs, rng)
+            if not has_numbers:
+                verbs = [v for v in verbs if v.lower() not in ("compute", "calculate")]
             targeted_prompt = (
                 f"{prompt}\n\nNote: The question must strictly start with one of: {', '.join(verbs)}. "
-                f"Ensure the first word is one of these verbs and ends with '?'."
+                f"Ensure the first word is one of these verbs and ends with '?'. "
+                f"Do not reference textbooks, chapters, or figures, and write a complete self-contained question."
             )
             raw = client.generate(targeted_prompt, temperature=temp + 0.1, num_predict=num_predict)
             q = clean_output(raw)
             ok, reason = validate_question(q, level)
+            if ok and has_textbook_reference(q):
+                ok = False
+                reason = "question contains textbook references"
+            if ok and is_truncated_text(q, is_question=True):
+                ok = False
+                reason = "question is truncated"
+            if ok and not has_numbers and first_word(q) in ("compute", "calculate"):
+                ok = False
+                reason = "compute/calculate verb in non-numerical context"
             attempts += 1
             if ok:
-                store_cached_response(prompt, client_model, raw, temperature=temp)
+                if not is_truncated_text(q, is_question=True):
+                    store_cached_response(prompt, client_model, raw, temperature=temp)
                 break
 
     return {
@@ -134,8 +303,8 @@ def generate_answer(
 ) -> dict[str, Any]:
     """Generate model answer grounded in chunk context.
 
-    Splits model output on lines that are exactly OR (case-insensitive) into alternatives.
-    Validates non-empty, minimum length for marks, and cosine similarity with chunk text.
+    Validates non-empty, minimum length for marks, absence of banned meta phrases,
+    absence of textbook references, non-truncation, and cosine similarity with chunk text.
     """
     rng = rng or random.Random()
     marks = marks if marks is not None and marks > 0 else 5
@@ -149,7 +318,14 @@ def generate_answer(
     reason = "no output"
     ok = False
 
-    num_predict = min(400, max(60, marks * 30))
+    # Problem 4: Proportional token caps for answers
+    if marks <= 5:
+        num_predict = 450
+    elif marks <= 8:
+        num_predict = 750
+    else:
+        num_predict = 1000
+
     client_model = getattr(client, "model", "llama3.1:8b")
 
     for attempt in range(1, max_retries + 1):
@@ -164,26 +340,9 @@ def generate_answer(
 
         # Clean output fences
         text = re.sub(r"^```\w*|```$", "", (raw or "").strip(), flags=re.M).strip()
-        lines = [line.strip() for line in text.splitlines()]
-
-        # Split on lines that are exactly "OR" (case-insensitive)
-        alternatives: list[str] = []
-        cur_buf: list[str] = []
-        for line in lines:
-            if line.upper() == "OR":
-                alt_text = "\n".join(cur_buf).strip()
-                if alt_text:
-                    alternatives.append(alt_text)
-                cur_buf = []
-            else:
-                cur_buf.append(line)
-        if cur_buf:
-            alt_text = "\n".join(cur_buf).strip()
-            if alt_text:
-                alternatives.append(alt_text)
-
+        full_answer, alternatives = clean_answer_text(text)
         last_alternatives = alternatives
-        last_answer = "\nOR\n".join(alternatives).strip()
+        last_answer = "\nOR\n".join(alternatives) if len(alternatives) > 1 else full_answer
 
         # Validation 1: non-empty
         if not last_answer:
@@ -197,7 +356,31 @@ def generate_answer(
             reason = f"answer length {word_count} words below minimum {min_words} for {marks} marks"
             continue
 
-        # Validation 3: grounded cosine similarity check
+        # Validation 3: banned meta-commentary phrases (Problem 5)
+        if has_banned_answer_phrases(last_answer):
+            reason = "answer contains banned phrases (meta commentary / apology)"
+            continue
+
+        # Validation 4: textbook references (Problem 6)
+        if has_textbook_reference(last_answer):
+            reason = "answer contains textbook references"
+            continue
+
+        # Validation 5: truncation check (Problem 4)
+        if is_truncated_text(last_answer, is_question=False):
+            if attempt < max_retries:
+                reason = "answer is truncated"
+                continue
+            else:
+                fallback = truncate_to_last_complete_sentence(last_answer)
+                if len(fallback.split()) >= min_words:
+                    last_answer = fallback
+                    last_alternatives = [fallback]
+                else:
+                    reason = "answer is truncated"
+                    continue
+
+        # Validation 6: grounded cosine similarity check
         if should_check_similarity:
             from retrieval.co_mapper import _m
             embedder = _m()
@@ -215,7 +398,7 @@ def generate_answer(
 
         ok = True
         reason = "ok"
-        if not cached:
+        if not cached and not is_truncated_text(last_answer, is_question=False):
             store_cached_response(prompt, client_model, raw, temperature=temp)
         break
 
@@ -277,7 +460,11 @@ def generate_paper_by_slots(
         workers: Optional max workers count (defaults to config.GENERATION_WORKERS).
         force_regenerate: If True, bypasses generation cache.
     """
-    usable = [c for c in chunks if c.get("word_count", len(c.get("text", "").split())) >= MIN_CONTEXT_WORDS]
+    usable = [
+        c for c in chunks
+        if c.get("word_count", len(c.get("text", "").split())) >= MIN_CONTEXT_WORDS
+        and is_content_chunk(c)
+    ]
     if not usable or not slots:
         return {"questions": [], "rejected": [], "unfilled": list(slots)}
 
@@ -322,7 +509,12 @@ def generate_paper_by_slots(
         slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
         slot_rejected = []
 
-        for chunk in pool * 2:
+        # Bound retries: at most 2 retries (up to 3 candidate chunks tested per slot)
+        max_chunk_tries = min(len(pool), 3)
+        for chunk_idx in range(max_chunk_tries):
+            chunk = pool[chunk_idx]
+            if not is_content_chunk(chunk):
+                continue
             try:
                 rec = generate_question(
                     chunk,

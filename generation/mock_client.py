@@ -17,7 +17,8 @@ def _extract_concept(ctx: str) -> str:
 
         # Strip preamble phrases
         cleaned = re.sub(
-            r"^(look at the following diagram\.\s*|look at\b.*?[\.:]\s*|"
+            r"^(in this (?:chapter|section|book|volume)\s*(?:[0-9ivxlc]+)?(?:\s+of\s+[^,]+)?,\s*|"
+            r"look at the following diagram\.\s*|look at\b.*?[\.:]\s*|"
             r"the learners of this tutorial are expected to know the basics of\s*|"
             r"this tutorial has introduced you to [^.]*\.\s*|"
             r"here is an example to test your current knowledge of [^:]*:\s*|"
@@ -40,6 +41,10 @@ def _extract_concept(ctx: str) -> str:
     words = c.split()
     if len(words) > 12:
         c = " ".join(words[:12])
+
+    c = re.sub(r"[\s,;:–—\-]+", " ", c).strip()
+    c = re.sub(r"\b(in|of|to|for|on|at|with|by|from|and|or|that|as|the|a|an)\s*$", "", c, flags=re.I).strip()
+    c = c.rstrip(".,:;!?")
 
     if len(c) > 1:
         c = c[0].lower() + c[1:]
@@ -163,7 +168,20 @@ class MockClient:
         marks = int(m_match.group(1)) if m_match else 5
 
         raw_sents = [s.strip() for s in re.split(r"[\.\n]+", ctx) if len(s.strip().split()) >= 3]
-        if not raw_sents:
+        cleaned_sents = []
+        for s in raw_sents:
+            cleaned = re.sub(
+                r"\bin this (?:chapter|section|book|volume)\s*(?:[0-9ivxlc]+)?(?:\s+of\s+[^,]+)?,\s*|"
+                r"look at the following diagram\.\s*|look at\b.*?[\.:]\s*",
+                "",
+                s,
+                flags=re.I,
+            ).strip()
+            if len(cleaned.split()) >= 3:
+                cleaned_sents.append(cleaned)
+        if cleaned_sents:
+            raw_sents = cleaned_sents
+        elif not raw_sents:
             raw_sents = ["The technical system operates according to foundational computational principles."]
 
         # Target words scale strictly with marks

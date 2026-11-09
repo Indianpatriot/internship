@@ -61,13 +61,20 @@ class OllamaClient:
             payload["format"] = format
 
         last = None
+        current_num_predict = num_predict
         for attempt in range(self.retries):
             try:
+                payload["options"]["num_predict"] = current_num_predict
                 r = self.session.post(f"{self.host}/api/generate", json=payload, timeout=self.timeout)
                 if r.status_code == 404:
                     raise OllamaError(f"Model '{self.model}' not found. Run: ollama pull {self.model}")
                 r.raise_for_status()
-                return r.json().get("response", "")
+                data = r.json()
+                resp = data.get("response", "")
+                if data.get("done_reason") == "length" and attempt < self.retries - 1:
+                    current_num_predict = int(current_num_predict * 1.5)
+                    continue
+                return resp
             except OllamaError:
                 raise
             except (requests.RequestException, ValueError) as e:

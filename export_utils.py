@@ -8,6 +8,7 @@ Implements Paper Assembly & Export (Step 2 of UI and Export requirements):
 - Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
 """
 import io
+import re
 from typing import Any, Optional
 
 import docx
@@ -30,30 +31,91 @@ from reportlab.platypus import (
 )
 
 
-def _split_answer_alternatives(q: dict[str, Any]) -> list[str]:
-    """Extract distinct answer alternatives from QuestionRecord."""
-    if q.get("answer_alternatives") and isinstance(q["answer_alternatives"], list):
-        return [str(a).strip() for a in q["answer_alternatives"] if str(a).strip()]
+HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8,64}[_\s\-]+", re.I)
 
-    raw_ans = q.get("answer", "")
-    if not raw_ans:
-        return []
 
-    # Check for text with 'OR' on its own line
-    lines = raw_ans.splitlines()
-    alts: list[str] = []
-    curr: list[str] = []
-    for line in lines:
-        if line.strip() == "OR":
-            if curr:
-                alts.append("\n".join(curr).strip())
-                curr = []
+def clean_book_name(name: str) -> str:
+    """Strip any leading hex hash (8-64 chars) and clean up book titles."""
+    if not name:
+        return ""
+    s = str(name).strip()
+    s = re.sub(r"^[•*–—\-]\s*", "", s).strip()
+    s = re.sub(r"^[0-9a-fA-F]{8,64}\s*[:_\-\s]+", "", s).strip()
+    s = re.sub(r"\b[0-9a-fA-F]{8,64}\b\s*[:_\-\s]*", "", s).strip()
+    if "_" in s and " " not in s:
+        s = s.replace("_", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _get_paper_header_values(
+    questions: list[dict[str, Any]],
+    totals_summary: Optional[dict[str, Any]] = None,
+) -> tuple[int, str]:
+    """Compute (attempted_marks, question_count_label)."""
+    from totals import _filter_attempted_questions
+
+    if totals_summary and "total_marks" in totals_summary:
+        total_marks = int(totals_summary["total_marks"])
+    else:
+        attempted_qs = _filter_attempted_questions(questions)
+        total_marks = sum(int(q.get("marks", 0)) for q in attempted_qs)
+
+    units = sorted(list({q.get("unit") for q in questions if q.get("unit") is not None}))
+    has_choices = any(q.get("alternative_group") for q in questions)
+    if units:
+        n_units = len(units)
+        if has_choices:
+            q_count_text = f"Total Units: {n_units} (Choice in each)"
         else:
-            curr.append(line)
-    if curr:
-        alts.append("\n".join(curr).strip())
+            q_count_text = f"Total Units: {n_units}"
+    else:
+        main_q_count = len({q.get("question_no") for q in questions if q.get("question_no") is not None})
+        if main_q_count > 0:
+            q_count_text = f"Total Questions: {main_q_count}"
+        else:
+            q_count_text = f"Total Questions: {len(questions)}"
 
-    return alts if len(alts) > 1 else [raw_ans.strip()]
+    return total_marks, q_count_text
+
+
+def _split_answer_alternatives(q: dict[str, Any]) -> list[str]:
+    """Extract distinct answer alternatives from QuestionRecord, cleaning away '― OR ―'."""
+    raw_alts = q.get("answer_alternatives")
+    if raw_alts and isinstance(raw_alts, list):
+        alts = [str(a).strip() for a in raw_alts if str(a).strip()]
+    else:
+        raw_ans = q.get("answer", "")
+        if not raw_ans:
+            return []
+        lines = raw_ans.splitlines()
+        alts = []
+        curr = []
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r"^(?:[—―\-]+\s*)?OR(?:\s*[—―\-]+)?[:\.]?$", stripped, re.I):
+                if curr:
+                    alts.append("\n".join(curr).strip())
+                    curr = []
+            elif re.match(r"^Alternative approach(?:\s*\d+)?[:\.]?", stripped, re.I):
+                if curr:
+                    alts.append("\n".join(curr).strip())
+                    curr = []
+                content_after = re.sub(r"^Alternative approach(?:\s*\d+)?[:\.]?\s*", "", stripped, flags=re.I).strip()
+                if content_after:
+                    curr.append(content_after)
+            else:
+                curr.append(line)
+        if curr:
+            alts.append("\n".join(curr).strip())
+
+    cleaned_alts = []
+    for a in alts:
+        cleaned_a = re.sub(r"^[—―-]+\s*OR\s*[—―-]+$", "", a, flags=re.I | re.M).strip()
+        cleaned_a = re.sub(r"^[—―-]+\s*OR\s*[—―-]+", "Alternative approach:", cleaned_a, flags=re.I).strip()
+        if cleaned_a and cleaned_a not in cleaned_alts:
+            cleaned_alts.append(cleaned_a)
+
+    return cleaned_alts if cleaned_alts else ([q.get("answer", "").strip()] if q.get("answer") else [])
 
 
 def create_docx_exam_paper(
@@ -83,6 +145,9 @@ def create_docx_exam_paper(
         section.left_margin = Inches(0.75)
         section.right_margin = Inches(0.75)
 
+    clean_course = clean_book_name(course_name)
+    clean_covered = [clean_book_name(c) for c in covered_chapters] if covered_chapters else None
+
     # 1. Header Information
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -91,19 +156,19 @@ def create_docx_exam_paper(
     title_run.font.size = Pt(15)
     title_run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
 
-    sub_run = title_p.add_run(f"Subject: {course_name} ({subject_code})")
+    sub_run = title_p.add_run(f"Subject: {clean_course} ({subject_code})")
     sub_run.bold = True
     sub_run.font.size = Pt(11)
 
-    if covered_chapters:
+    if clean_covered:
         ch_p = doc.add_paragraph()
         ch_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {', '.join(covered_chapters)}")
+        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {', '.join(clean_covered)}")
         ch_run.font.size = Pt(9.5)
         ch_run.font.italic = True
         ch_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
 
-    total_marks = sum(int(q.get("marks", 0)) for q in questions)
+    total_marks, q_count_text = _get_paper_header_values(questions, totals_summary)
     time_str = "1.5 Hours" if total_marks <= 30 else ("2 Hours" if total_marks <= 50 else "3 Hours")
 
     # Meta Table: Date / Time / Total Marks
@@ -117,7 +182,7 @@ def create_docx_exam_paper(
 
     meta_cells = meta_table.rows[0].cells
     meta_cells[0].text = f"Time Allowed: {time_str}"
-    meta_cells[1].text = f"Total Questions: {len(questions)}"
+    meta_cells[1].text = q_count_text
     meta_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     meta_cells[2].text = f"Max. Marks: {total_marks}"
     meta_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -267,10 +332,21 @@ def create_docx_exam_paper(
         col_idx += 1
 
         if has_source:
-            ch = q.get("chapter", "")
+            ch = clean_book_name(q.get("chapter", ""))
+            b_title = clean_book_name(q.get("book_title", ""))
             p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
-            src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
+            if b_title and ch.lower().startswith(b_title.lower()):
+                ch = ch[len(b_title):].lstrip(" -:•")
+            if b_title and ch:
+                src_label = f"{b_title} - {ch}"
+            elif ch:
+                src_label = ch
+            elif b_title:
+                src_label = b_title
+            else:
+                src_label = ""
+            src_str = f"{src_label} ({p_str})" if src_label and p_str else (src_label or p_str)
             row_cells[col_idx].text = src_str
             row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
@@ -311,7 +387,7 @@ def create_docx_exam_paper(
         ans_run.font.size = Pt(14)
         ans_run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
 
-        sub_ans = ans_heading.add_run(f"Subject: {course_name} ({subject_code})")
+        sub_ans = ans_heading.add_run(f"Subject: {clean_course} ({subject_code})")
         sub_ans.bold = True
         sub_ans.font.size = Pt(10.5)
 
@@ -353,22 +429,15 @@ def create_docx_exam_paper(
 
             alternatives = _split_answer_alternatives(q)
             if len(alternatives) > 1:
-                # Substep 2.1: Render answer alternatives in OR format
+                # Render answer alternatives with clear labeling (no internal OR)
                 for a_idx, alt in enumerate(alternatives, 1):
                     ap = doc.add_paragraph()
-                    a_label = ap.add_run(f"Model Answer Alternative {a_idx}:\n")
+                    label = "Model Answer:\n" if a_idx == 1 else f"Alternative approach {a_idx - 1}:\n"
+                    a_label = ap.add_run(label)
                     a_label.bold = True
                     a_label.font.size = Pt(9.5)
                     a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
                     ap.add_run(alt).font.size = Pt(9.0)
-
-                    if a_idx < len(alternatives):
-                        sep_p = doc.add_paragraph()
-                        sep_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        sep_r = sep_p.add_run("— OR —")
-                        sep_r.bold = True
-                        sep_r.font.size = Pt(9.5)
-                        sep_r.font.color.rgb = RGBColor(0x25, 0x63, 0xEB)
             elif alternatives:
                 ap = doc.add_paragraph()
                 a_label = ap.add_run("Model Answer / Key Points:\n")
@@ -611,21 +680,24 @@ def create_pdf_exam_paper(
         fontName="Helvetica-Bold",
     )
 
+    clean_course = clean_book_name(course_name)
+    clean_covered = [clean_book_name(c) for c in covered_chapters] if covered_chapters else None
+
     elements = []
     elements.append(Paragraph(institution_name.upper(), title_style))
-    elements.append(Paragraph(f"Subject: {course_name} ({subject_code})", sub_style))
-    if covered_chapters:
-        elements.append(Paragraph(f"Syllabus / Covered Chapters: {', '.join(covered_chapters)}", ch_style))
+    elements.append(Paragraph(f"Subject: {clean_course} ({subject_code})", sub_style))
+    if clean_covered:
+        elements.append(Paragraph(f"Syllabus / Covered Chapters: {', '.join(clean_covered)}", ch_style))
     elements.append(Spacer(1, 8))
 
-    total_marks = sum(int(q.get("marks", 0)) for q in questions)
+    total_marks, q_count_text = _get_paper_header_values(questions, totals_summary)
     time_str = "1.5 Hours" if total_marks <= 30 else ("2 Hours" if total_marks <= 50 else "3 Hours")
 
     # Meta banner
     meta_data = [
         [
             Paragraph(f"<b>Time Allowed:</b> {time_str}", styles["Normal"]),
-            Paragraph(f"<b>Total Questions:</b> {len(questions)}", styles["Normal"]),
+            Paragraph(f"<b>{q_count_text}</b>", styles["Normal"]),
             Paragraph(f"<b>Max. Marks:</b> {total_marks}", styles["Normal"]),
         ]
     ]
@@ -754,10 +826,21 @@ def create_pdf_exam_paper(
         row.append(Paragraph(str(q.get("co", "")), q_bold_cell))
 
         if has_source:
-            ch = q.get("chapter", "")
+            ch = clean_book_name(q.get("chapter", ""))
+            b_title = clean_book_name(q.get("book_title", ""))
             p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
-            src_str = f"{ch} ({p_str})" if ch and p_str else (ch or p_str)
+            if b_title and ch.lower().startswith(b_title.lower()):
+                ch = ch[len(b_title):].lstrip(" -:•")
+            if b_title and ch:
+                src_label = f"{b_title} - {ch}"
+            elif ch:
+                src_label = ch
+            elif b_title:
+                src_label = b_title
+            else:
+                src_label = ""
+            src_str = f"{src_label} ({p_str})" if src_label and p_str else (src_label or p_str)
             row.append(Paragraph(src_str, q_cell_style))
 
         table_data.append(row)
@@ -807,7 +890,7 @@ def create_pdf_exam_paper(
     if has_any_answers:
         elements.append(PageBreak())
         elements.append(Paragraph("SCHEME OF EVALUATION & MODEL ANSWERS", title_style))
-        elements.append(Paragraph(f"Subject: {course_name} ({subject_code})", sub_style))
+        elements.append(Paragraph(f"Subject: {clean_course} ({subject_code})", sub_style))
         elements.append(Spacer(1, 10))
 
         prev_ans_q: Optional[dict[str, Any]] = None
@@ -837,10 +920,9 @@ def create_pdf_exam_paper(
             alternatives = _split_answer_alternatives(q)
             if len(alternatives) > 1:
                 for a_idx, alt in enumerate(alternatives, 1):
-                    elements.append(Paragraph(f"<b>Answer Alternative {a_idx}:</b>", ans_text_style))
+                    label = "Model Answer:" if a_idx == 1 else f"Alternative approach {a_idx - 1}:"
+                    elements.append(Paragraph(f"<b>{label}</b>", ans_text_style))
                     elements.append(Paragraph(alt.replace("\n", "<br/>"), ans_text_style))
-                    if a_idx < len(alternatives):
-                        elements.append(Paragraph("— OR —", ans_or_sep_style))
             elif alternatives:
                 elements.append(Paragraph("<b>Model Answer / Key Points:</b>", ans_text_style))
                 elements.append(Paragraph(alternatives[0].replace("\n", "<br/>"), ans_text_style))

@@ -23,16 +23,21 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not chunks:
         return []
 
-    from ingestion.heading_detect import is_non_content_title
+    from ingestion.heading_detect import is_non_content_title, normalize_chapter_title
 
     distinct_books = {c.get("book_id") or c.get("book_title") for c in chunks if c.get("book_id") or c.get("book_title")}
     multiple_books = len(distinct_books) > 1
 
     chapter_dict: dict[Any, dict[str, Any]] = {}
     for c in chunks:
-        chap = c.get("chapter")
-        if not chap or chap == "Document" or is_non_content_title(chap):
+        raw_chap = c.get("chapter")
+        if not raw_chap or raw_chap == "Document" or is_non_content_title(raw_chap):
             continue
+
+        chap = normalize_chapter_title(raw_chap)
+        if not chap or is_non_content_title(chap):
+            continue
+        c["chapter"] = chap
 
         p_start = c.get("page_start", 0)
         p_end = c.get("page_end", p_start)
@@ -44,7 +49,7 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             display_chap = chap
 
-        dict_key = (book_label, chap) if multiple_books else chap
+        dict_key = (book_label.lower(), chap.lower()) if multiple_books else chap.lower()
 
         if dict_key not in chapter_dict:
             chapter_dict[dict_key] = {

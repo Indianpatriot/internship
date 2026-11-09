@@ -470,3 +470,246 @@ def test_change3_textbook_names_upload_order_no_hex(tmp_path):
     rem_binfo = list(lib_after_removal["books"].values())[0]
     rem_label = rem_binfo.get("display_label") or rem_binfo.get("title")
     assert rem_label == "1 DEF"
+
+
+# -----------------------------------------------------------------------------
+# Regression Tests for 8 Quality Issues (Problems 1 - 8)
+# -----------------------------------------------------------------------------
+
+
+def test_quality_problem1_front_matter_exclusion():
+    """Problem 1: Non-content sections (about this book, cover, etc.) must be detected and rejected."""
+    non_content_samples = [
+        "about this book",
+        "about the cover illustration",
+        "about the author",
+        "about the authors",
+        "about the technical editor",
+        "welcome",
+        "preface",
+        "foreword",
+        "acknowledgements",
+        "dedication",
+        "table of contents",
+        "brief contents",
+        "contents",
+        "to get the most out of this book",
+        "conventions used",
+        "get in touch",
+        "reviews",
+        "other books you may enjoy",
+        "assessments",
+        "answers",
+        "index",
+        "bibliography",
+        "references",
+        "glossary",
+    ]
+    for sample in non_content_samples:
+        assert is_non_content_title(sample) is True, f"Failed to detect non-content title: {sample}"
+
+    # Verify select_chunks_for_unit drops chunks with non-content chapter or section
+    chunks = [
+        {"chunk_id": "c1", "chapter": "About this book", "section": "Overview", "text": "Audience info.", "book_id": "b1"},
+        {"chunk_id": "c2", "chapter": "Chapter 1: Containers", "section": "About the author", "text": "Author bio.", "book_id": "b1"},
+        {"chunk_id": "c3", "chapter": "Chapter 1: Containers", "section": "1.1 Architecture", "text": "Real content here.", "book_id": "b1"},
+    ]
+    filtered = select_chunks_for_unit(chunks, unit_sources=None, unit=None)
+    assert len(filtered) == 1
+    assert filtered[0]["chunk_id"] == "c3"
+
+
+def test_quality_problem2_source_labels_and_chapter_dedup():
+    """Problem 2: Discard TOC entries, strip bullets, unify Chapter N: format, and prevent book-as-chapter."""
+    from ingestion.heading_detect import normalize_chapter_title
+
+    assert normalize_chapter_title("• Chapter 1: Docker In Practice") == "Chapter 1: Docker In Practice"
+    assert normalize_chapter_title("•   Chapter 2, Kubernetes Architecture") == "Chapter 2: Kubernetes Architecture"
+    assert normalize_chapter_title("Chapter 3: Pods and Services .............. 45") == "Chapter 3: Pods and Services"
+    assert normalize_chapter_title("Chapter 4: Deployments      120") == "Chapter 4: Deployments"
+
+    # Verify formatting helper format_source_label or export cleaner
+    from export_utils import clean_book_name
+    assert clean_book_name("6a1831f8f825_Docker_In_Practice") == "Docker In Practice"
+    assert clean_book_name("• 6a1831f8f825: 1. Docker In Practice") == "1. Docker In Practice"
+
+
+def test_quality_problem3_hex_prefix_cleanup():
+    """Problem 3: Pass inputs with hex prefixes to export pipeline and verify no hex leak in outputs."""
+    from export_utils import clean_book_name, create_docx_exam_paper, create_pdf_exam_paper
+
+    raw_hex = "6a1831f8f825"
+    hex_course = f"{raw_hex}_Docker_In_Practice"
+    clean_course = clean_book_name(hex_course)
+    assert raw_hex not in clean_course
+    assert clean_course == "Docker In Practice"
+
+    questions = [
+        {
+            "id": "1(a)",
+            "question": "Explain container isolation mechanisms?",
+            "marks": 10,
+            "level": "L2",
+            "co": "CO1",
+            "unit": 1,
+            "chapter": f"{raw_hex}: Chapter 1 Docker In Practice",
+            "book_title": f"{raw_hex}_Docker_In_Practice",
+            "page_start": 25,
+            "answer": "Containers leverage Linux cgroups and namespaces.",
+        }
+    ]
+
+    docx_bytes = create_docx_exam_paper(
+        questions=questions,
+        course_name=hex_course,
+        covered_chapters=[f"{raw_hex}: Chapter 1 Docker In Practice"],
+    )
+    assert raw_hex.encode("utf-8") not in docx_bytes
+
+    pdf_bytes = create_pdf_exam_paper(
+        questions=questions,
+        course_name=hex_course,
+        covered_chapters=[f"{raw_hex}: Chapter 1 Docker In Practice"],
+    )
+    assert raw_hex.encode("utf-8") not in pdf_bytes
+
+
+def test_quality_problem4_truncation_detection_and_retry():
+    """Problem 4: Detect cut-off questions/answers (missing terminal punctuation, dangling words) and retry."""
+    from generation.generator import generate_question, is_truncated_text
+
+    # Dangling endings
+    assert is_truncated_text("Compare and contrast pods, use cases, and impl", is_question=True) is True
+    assert is_truncated_text("Ensuring high availab", is_question=False) is True
+    assert is_truncated_text("Scalable applications that cannot be scaled ho", is_question=False) is True
+    assert is_truncated_text("Explain the deployment architecture", is_question=False) is True  # no punctuation
+    assert is_truncated_text("Explain the deployment architecture.", is_question=False) is False
+    assert is_truncated_text("How do pods scale in Kubernetes?", is_question=True) is False
+
+    # Retry when mock client returns truncated then complete
+    class FlakyMockClient:
+        model = "mock"
+        attempts = 0
+
+        def generate(self, prompt, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                return "Explain the container lifecycle and impl"
+            return "Explain the container lifecycle and operational mechanisms in modern clusters?"
+
+    flaky_client = FlakyMockClient()
+    chunk = {
+        "text": "Containers manage process lifecycles and operational mechanisms in modern clusters.",
+        "chunk_id": "c1",
+        "word_count": 25,
+    }
+    rec = generate_question(chunk, "L2", flaky_client, max_retries=2, force_regenerate=True)
+    assert rec["valid"] is True
+    assert rec["attempts"] >= 2
+    assert rec["question"].endswith("?")
+
+
+def test_quality_problem5_banned_answer_phrases_and_or_separator():
+    """Problem 5: Banned apology phrases in answers rejected; OR separators converted to Alternative approach."""
+    from generation.generator import clean_answer_text, has_banned_answer_phrases
+
+    banned = [
+        "The text does not explicitly mention standard Kubernetes commands.",
+        "Based on general knowledge, pods can be scaled with kubectl.",
+        "The provided text cannot be answered with precision.",
+        "The passage doesn't mention replication controllers.",
+    ]
+    for b in banned:
+        assert has_banned_answer_phrases(b) is True
+
+    clean_ans = "Kubernetes provides kubectl scale deployment to adjust replica counts."
+    assert has_banned_answer_phrases(clean_ans) is False
+
+    # Test clean_answer_text replaces OR with Alternative approach and leaves no '― OR ―'
+    raw_with_or = "Approach 1: HPA scales on CPU metrics.\n\n― OR ―\n\nApproach 2: HPA scales on custom memory metrics."
+    full, alts = clean_answer_text(raw_with_or)
+    assert "― OR ―" not in full
+    assert "— OR —" not in full
+    assert len(alts) == 2
+    assert "Alternative approach:" in full
+
+
+def test_quality_problem6_textbook_independence():
+    """Problem 6: Stems and answers referencing physical textbook/author/chapters are rejected."""
+    from generation.generator import has_textbook_reference
+
+    bad_stems = [
+        "Name the primary target audience for this book?",
+        "Mention the main aim of Chapter 17?",
+        "According to the author in Section 3.2, explain pods?",
+        "As described in the text, discuss deployment strategies?",
+        "Look at Figure 4.2 and describe the architecture?",
+    ]
+    for stem in bad_stems:
+        assert has_textbook_reference(stem) is True, f"Failed to reject textbook-dependent stem: {stem}"
+
+    good_stem = "Describe the deployment strategies available in Kubernetes?"
+    assert has_textbook_reference(good_stem) is False
+
+
+def test_quality_problem7_marks_blooms_kd_alignment():
+    """Problem 7: High marks (>= 10) never get L1; low marks (<= 3) never get L5/L6; no Compute on non-numbers."""
+    # Build 100-mark paper blueprint
+    bp = build_blueprint(preset=100, sub_question_counts=2, seed=42)
+    slots = bp["slots"]
+    for s in slots:
+        m = s["marks"]
+        lvl = s["level"]
+        if m >= 10:
+            assert lvl != "L1", f"Slot {s['id']} has marks {m} >= 10 but was allocated L1 (Remember)"
+        if m <= 3:
+            assert lvl not in ("L5", "L6"), f"Slot {s['id']} has marks {m} <= 3 but was allocated {lvl}"
+
+    # Verb sanity: context without numbers cannot sample or keep compute/calculate
+    from generation.generator import generate_question
+    non_numeric_chunk = {
+        "text": "Docker images encapsulate runtime dependencies, system binaries, and configuration files.",
+        "chunk_id": "c_cli",
+        "word_count": 20,
+    }
+    client = MockClient()
+    rec = generate_question(non_numeric_chunk, "L3", client, marks=5, force_regenerate=True)
+    assert rec["valid"] is True
+    assert rec["verb"].lower() not in ("compute", "calculate")
+
+
+def test_quality_problem8_paper_header_values():
+    """Problem 8: Choice paper header shows attempted marks (100) and unit count, not offered marks (200) or leaf count (26)."""
+    from export_utils import _get_paper_header_values
+
+    # Simulate 100-mark choice paper with 5 units x 2 alternative questions (200 offered marks)
+    questions = []
+    for u in range(1, 6):
+        for q_no in [u * 2 - 1, u * 2]:
+            questions.append({
+                "id": f"{q_no}(a)",
+                "unit": u,
+                "question_no": q_no,
+                "marks": 10,
+                "alternative_group": f"unit_{u}_choice",
+                "question": f"Question {q_no} part a",
+            })
+            questions.append({
+                "id": f"{q_no}(b)",
+                "unit": u,
+                "question_no": q_no,
+                "marks": 10,
+                "alternative_group": f"unit_{u}_choice",
+                "question": f"Question {q_no} part b",
+            })
+
+    # Total offered is 5 units x 2 choice questions x 20 marks = 200 marks
+    assert sum(q["marks"] for q in questions) == 200
+    assert len(questions) == 20
+
+    attempted_marks, q_count_text = _get_paper_header_values(questions)
+    assert attempted_marks == 100, f"Expected 100 attempted marks, got {attempted_marks}"
+    assert "Total Units: 5 (Choice in each)" in q_count_text
+    assert "20" not in q_count_text
+    assert "26" not in q_count_text
+

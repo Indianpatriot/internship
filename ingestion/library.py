@@ -19,7 +19,7 @@ from ingestion.pipeline import ingest
 from retrieval.sources import select_chunks_for_unit
 
 CACHE_DIR = Path(".cache/ingestion")
-FILTER_VERSION = "pf_v3"
+FILTER_VERSION = "pf_v4"
 HEX_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8,64}[_-]+", re.I)
 
 
@@ -184,12 +184,20 @@ def load_library(
         for c in chunks:
             c["display_label"] = display_label
 
-        # Collect ordered unique chapters
+        # Collect ordered unique chapters, normalized and deduplicated case-insensitively
+        from ingestion.heading_detect import is_non_content_title, normalize_chapter_title
         ordered_chapters: list[str] = []
+        seen_ch_lower: set[str] = set()
         for c in chunks:
-            ch = c.get("chapter")
-            if ch and ch not in ordered_chapters:
-                ordered_chapters.append(ch)
+            raw_ch = c.get("chapter")
+            if raw_ch:
+                norm_ch = normalize_chapter_title(raw_ch)
+                c["chapter"] = norm_ch
+                if norm_ch and not is_non_content_title(norm_ch):
+                    ch_lower = norm_ch.lower()
+                    if ch_lower not in seen_ch_lower:
+                        seen_ch_lower.add(ch_lower)
+                        ordered_chapters.append(norm_ch)
 
         min_page = min((c.get("page_start", 1) for c in chunks), default=1)
         max_page = max((c.get("page_end", 1) for c in chunks), default=1)
@@ -213,13 +221,20 @@ def load_library(
 
 def list_chapters(library: dict[str, Any], book_id: str) -> list[dict[str, Any]]:
     """Return chapters of a book in page order with chunk counts and page bounds."""
-    from ingestion.heading_detect import is_non_content_title
+    from ingestion.heading_detect import is_non_content_title, normalize_chapter_title
     books = library.get("books", {})
     if book_id not in books:
         return []
 
     book_info = books[book_id]
-    ordered_chapters = [ch for ch in list(book_info.get("chapters", [])) if not is_non_content_title(ch)]
+    ordered_chapters: list[str] = []
+    seen_lower: set[str] = set()
+    for ch in list(book_info.get("chapters", [])):
+        norm = normalize_chapter_title(ch)
+        if norm and not is_non_content_title(norm) and norm.lower() not in seen_lower:
+            seen_lower.add(norm.lower())
+            ordered_chapters.append(norm)
+
     book_chunks = [
         c for c in library.get("chunks", [])
         if c.get("book_id") == book_id and not is_non_content_title(c.get("chapter", ""))

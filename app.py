@@ -40,7 +40,7 @@ from chapter_filter import (
     get_chapter_metadata,
     get_filter_summary,
 )
-from export_utils import create_docx_exam_paper, create_pdf_exam_paper
+from export_utils import clean_book_name, create_docx_exam_paper, create_pdf_exam_paper
 from generation.mock_client import MockClient
 from generation.ollama_client import OllamaClient
 from generation.generator import generate_paper_by_slots
@@ -1005,9 +1005,10 @@ if uploaded_pdfs:
 
     if len(uploaded_pdfs) == 1:
         single_binfo = list(books.values())[0] if books else None
-        st.session_state.course_title = single_binfo.get("display_label", single_binfo.get("title", titles[0])) if single_binfo else titles[0]
+        title_cand = single_binfo.get("title", titles[0]) if single_binfo else titles[0]
+        st.session_state.course_title = clean_book_name(title_cand)
     else:
-        book_titles = [binfo.get("display_label", binfo["title"]) for binfo in books.values()]
+        book_titles = [clean_book_name(binfo.get("title", binfo.get("display_label", ""))) for binfo in books.values()]
         st.session_state.course_title = " & ".join(book_titles[:2])
 
     st.markdown(f"##### 📚 Uploaded Textbooks ({len(books)})")
@@ -1260,7 +1261,8 @@ if st.session_state.results:
     res = st.session_state.results
     questions = res.get("questions", [])
     unfilled = res.get("unfilled", [])
-    covered_chaps = res.get("covered_chapters", selected_chapters)
+    raw_chaps = res.get("covered_chapters", selected_chapters)
+    covered_chaps = [clean_book_name(ch) for ch in raw_chaps] if raw_chaps else []
 
     st.subheader("📋 Generated Question Paper")
 
