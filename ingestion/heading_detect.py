@@ -5,9 +5,33 @@ from collections import Counter
 CHAPTER_RE = re.compile(r"^(chapter|unit|module|part)\s+([0-9ivxlc]+|[a-z]+)\b", re.I)
 NUM_RE = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+[A-Za-z(]")
 
+NON_CONTENT_TITLES = {
+    "preface", "foreword", "acknowledgement", "acknowledgements",
+    "acknowledgment", "acknowledgments", "table of contents", "contents",
+    "brief contents", "list of figures", "list of tables", "list of illustrations",
+    "index", "subject index", "author index", "general index", "bibliography",
+    "references", "suggested readings", "further readings", "glossary",
+    "dedication", "copyright", "all rights reserved", "about the author",
+    "about the authors", "title page", "half title"
+}
+
 
 def _clean(t: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", t.lower()).strip()
+
+
+def is_non_content_title(t: str) -> bool:
+    clean_t = _clean(t)
+    if clean_t in NON_CONTENT_TITLES:
+        return True
+    for nc in (
+        "preface", "foreword", "acknowledgement", "acknowledgment",
+        "table of contents", "contents", "index", "bibliography",
+        "references", "glossary", "dedication", "copyright"
+    ):
+        if clean_t == nc or clean_t.startswith(nc + " ") or clean_t.endswith(" " + nc):
+            return True
+    return False
 
 
 def body_size(lines) -> float:
@@ -18,10 +42,14 @@ def body_size(lines) -> float:
 
 
 def _is_chapter(t):
+    if is_non_content_title(t):
+        return False
     return bool(CHAPTER_RE.match(t)) and len(t.split()) <= 12
 
 
 def _is_numbered(t):
+    if is_non_content_title(t):
+        return False
     return bool(NUM_RE.match(t)) and len(t.split()) <= 14
 
 
@@ -29,6 +57,8 @@ def _looks_like_heading(l, body):
     t = l["text"].strip()
     words = len(t.split())
     if words == 0 or len(t) > 120 or re.fullmatch(r"[\W\d_]+", t):
+        return False
+    if is_non_content_title(t):
         return False
     if _is_chapter(t):
         return True
@@ -43,6 +73,8 @@ def _looks_like_heading(l, body):
 
 
 def _level_from_text(t):
+    if is_non_content_title(t):
+        return None
     if _is_chapter(t):
         return 1
     m = NUM_RE.match(t)
@@ -52,11 +84,11 @@ def _level_from_text(t):
 
 
 def _toc_headings(lines, toc):
-    titles = {_clean(t): lvl for lvl, t, _ in toc if _clean(t)}
+    titles = {_clean(t): lvl for lvl, t, _ in toc if _clean(t) and not is_non_content_title(t)}
     found = []
     for i, l in enumerate(lines):
         lvl = titles.get(_clean(l["text"]))
-        if lvl:
+        if lvl and not is_non_content_title(l["text"]):
             found.append({"line_idx": i, "last_idx": i, "level": min(lvl, 4),
                           "title": l["text"], "page": l["page"]})
     return found
@@ -67,7 +99,7 @@ def detect_headings(lines, toc=None):
     if toc and len(toc) >= 3:
         found = _toc_headings(lines, toc)
         if len(found) >= 2:
-            return found
+            return [h for h in found if not is_non_content_title(h["title"])]
 
     body = body_size(lines)
     cand = [i for i, l in enumerate(lines) if _looks_like_heading(l, body)]
@@ -78,6 +110,8 @@ def detect_headings(lines, toc=None):
     for i in cand:
         l = lines[i]
         t = l["text"]
+        if is_non_content_title(t):
+            continue
         explicit = _level_from_text(t)
         prev = heads[-1] if heads else None
         # merge multi-line headings: "Chapter 1" + "Introduction"
@@ -89,4 +123,4 @@ def detect_headings(lines, toc=None):
         level = explicit or min(size_rank[l["size"]], 4)
         heads.append({"line_idx": i, "last_idx": i, "level": level,
                       "title": t, "page": l["page"]})
-    return heads
+    return [h for h in heads if not is_non_content_title(h["title"])]

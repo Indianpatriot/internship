@@ -86,8 +86,8 @@ def test_substep_6_3_generate_paper_respects_chapter_filter():
     filtered = filter_chunks(chunks, selected_chapters=selected)
 
     slots = [
-        {"id": "1", "part": "Part A", "co": "CO2", "level": "L1", "marks": 2},
-        {"id": "2", "part": "Part A", "co": "CO2", "level": "L2", "marks": 2},
+        {"id": "1", "unit": 1, "co": "CO2", "level": "L1", "marks": 2},
+        {"id": "2", "unit": 1, "co": "CO2", "level": "L2", "marks": 2},
     ]
     client = MockClient()
     result = generate_paper_by_slots(filtered, slots, client=client, seed=42)

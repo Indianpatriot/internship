@@ -5,7 +5,9 @@ and Revised Bloom's Taxonomy (Cognitive Process Dimension L1-L6 & Knowledge Dime
 """
 import os
 import re
+import hashlib
 import tempfile
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -24,6 +26,7 @@ from blueprint import (
     get_25_mark_blueprint,
     calculate_blueprint_stats,
     validate_outcomes,
+    validate_weightage_totals,
 )
 from blooms.revised_taxonomy import (
     KNOWLEDGE_DIMENSIONS,
@@ -42,6 +45,12 @@ from generation.mock_client import MockClient
 from generation.ollama_client import OllamaClient
 from generation.generator import generate_paper_by_slots
 from ingestion.pipeline import ingest
+from ingestion.library import (
+    load_library,
+    suggest_unit_sources,
+    list_chapters,
+    validate_unit_sources,
+)
 from retrieval.co_mapper import score_chunks_against_outcomes, _m
 from scheme import parse_scheme, parse_scheme_text
 from totals import summarize, totals_table_rows
@@ -137,6 +146,62 @@ def get_cached_scored_chunks(_chunks, outcomes_tuple: tuple[tuple[str, str], ...
     return score_chunks_against_outcomes(chunks_copy, outcomes_dict)
 
 
+@st.cache_data(show_spinner="Preparing Word document...")
+def get_cached_docx_paper(
+    questions_data,
+    course_name,
+    subject_code,
+    outcomes_tuple,
+    institution_name,
+    covered_chaps_tuple,
+    include_answers,
+    include_totals,
+    totals_summary_data,
+):
+    outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
+    return create_docx_exam_paper(
+        questions=questions_data,
+        course_name=course_name,
+        subject_code=subject_code,
+        outcomes=outcomes_map,
+        institution_name=institution_name,
+        covered_chapters=list(covered_chaps_tuple) if covered_chaps_tuple else None,
+        include_source=True,
+        include_knowledge_dim=True,
+        include_answers=include_answers,
+        include_totals=include_totals,
+        totals_summary=totals_summary_data,
+    )
+
+
+@st.cache_data(show_spinner="Preparing PDF document...")
+def get_cached_pdf_paper(
+    questions_data,
+    course_name,
+    subject_code,
+    outcomes_tuple,
+    institution_name,
+    covered_chaps_tuple,
+    include_answers,
+    include_totals,
+    totals_summary_data,
+):
+    outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
+    return create_pdf_exam_paper(
+        questions=questions_data,
+        course_name=course_name,
+        subject_code=subject_code,
+        outcomes=outcomes_map,
+        institution_name=institution_name,
+        covered_chapters=list(covered_chaps_tuple) if covered_chaps_tuple else None,
+        include_source=True,
+        include_knowledge_dim=True,
+        include_answers=include_answers,
+        include_totals=include_totals,
+        totals_summary=totals_summary_data,
+    )
+
+
 # -----------------------------------------------------------------------------
 # Session State Initialization
 # -----------------------------------------------------------------------------
@@ -154,6 +219,10 @@ if not available_cos:
 
 if "slots" not in st.session_state:
     st.session_state.slots = get_50_mark_blueprint(available_cos)
+if "slots_version" not in st.session_state:
+    st.session_state.slots_version = 0
+if "outcomes_version" not in st.session_state:
+    st.session_state.outcomes_version = 0
 
 if "results" not in st.session_state:
     st.session_state.results = None
@@ -289,6 +358,10 @@ with st.expander("📋 Upload your scheme for a more precise paper.", expanded=F
                 st.session_state.outcomes = [
                     {"code": k, "desc": v} for k, v in parsed["outcomes"].items()
                 ]
+                st.session_state.outcomes_version = st.session_state.get("outcomes_version", 0) + 1
+                for k in list(st.session_state.keys()):
+                    if k.startswith("outcome_code_") or k.startswith("outcome_desc_") or k.startswith("del_outcome_"):
+                        del st.session_state[k]
                 n_parsed = len(parsed["outcomes"])
                 if n_parsed < config.MIN_COS:
                     st.session_state.scheme_warning = (
@@ -308,7 +381,7 @@ with st.expander("📋 Upload your scheme for a more precise paper.", expanded=F
                 st.warning("Scheme parsed, but no Course Outcomes (CO1..COn) were detected.")
 
 # -----------------------------------------------------------------------------
-# Section 1: Course Outcomes (Dynamic CRUD)
+# Stage 1: Course Outcomes (Dynamic CRUD)
 # -----------------------------------------------------------------------------
 st.subheader("1. Course / Learning Outcomes")
 st.caption("Define the outcomes specific to your syllabus. Click '+ Add outcome' to append more.")
@@ -316,8 +389,9 @@ st.caption("Define the outcomes specific to your syllabus. Click '+ Add outcome'
 if st.session_state.get("scheme_warning"):
     st.warning(st.session_state.scheme_warning)
 
+ov = st.session_state.get("outcomes_version", 0)
 total_outcomes = len(st.session_state.outcomes)
-can_delete = total_outcomes > config.MIN_COS
+can_delete = total_outcomes > 1
 can_add = total_outcomes < config.MAX_COS
 
 outcomes_to_remove = []
@@ -327,7 +401,7 @@ for i, oc in enumerate(st.session_state.outcomes):
         new_code = st.text_input(
             "Code",
             value=oc["code"],
-            key=f"outcome_code_{i}",
+            key=f"outcome_code_{ov}_{i}",
             label_visibility="collapsed" if i > 0 else "visible",
             placeholder="e.g. CO1",
         )
@@ -336,7 +410,7 @@ for i, oc in enumerate(st.session_state.outcomes):
         new_desc = st.text_input(
             "Outcome Description",
             value=oc["desc"],
-            key=f"outcome_desc_{i}",
+            key=f"outcome_desc_{ov}_{i}",
             label_visibility="collapsed" if i > 0 else "visible",
             placeholder="Describe what students should be able to do...",
         )
@@ -344,12 +418,16 @@ for i, oc in enumerate(st.session_state.outcomes):
     with col_del:
         if i == 0:
             st.caption("Action")
-        if st.button("🗑️", key=f"del_outcome_{i}", help="Delete outcome", disabled=not can_delete):
+        if st.button("🗑️", key=f"del_outcome_{ov}_{i}", help="Delete outcome", disabled=not can_delete):
             outcomes_to_remove.append(i)
 
 if outcomes_to_remove:
     for idx in sorted(outcomes_to_remove, reverse=True):
         st.session_state.outcomes.pop(idx)
+    st.session_state.outcomes_version = ov + 1
+    for k in list(st.session_state.keys()):
+        if k.startswith("outcome_code_") or k.startswith("outcome_desc_") or k.startswith("del_outcome_"):
+            del st.session_state[k]
     st.rerun()
 
 col_btn, col_cap = st.columns([2, 5])
@@ -362,19 +440,23 @@ with col_btn:
         ]
         next_num = (max(existing_nums) + 1) if existing_nums else len(st.session_state.outcomes) + 1
         st.session_state.outcomes.append({"code": f"CO{next_num}", "desc": ""})
+        st.session_state.outcomes_version = ov + 1
+        for k in list(st.session_state.keys()):
+            if k.startswith("outcome_code_") or k.startswith("outcome_desc_") or k.startswith("del_outcome_"):
+                del st.session_state[k]
         st.rerun()
     if not can_add:
         st.caption(f"Maximum {config.MAX_COS} outcomes")
 
 with col_cap:
-    if not can_delete:
-        st.caption(f"Minimum {config.MIN_COS} outcomes")
+    if total_outcomes < config.MIN_COS:
+        st.caption(f"Minimum {config.MIN_COS} outcomes required for paper generation")
 
 
 st.divider()
 
 # -----------------------------------------------------------------------------
-# Section 2: Question Blueprint Slots (Revised Bloom's Taxonomy 2D)
+# Stage 2: Question Blueprint Slots (Revised Bloom's Taxonomy 2D)
 # -----------------------------------------------------------------------------
 st.subheader("2. Question Paper Blueprint (Slots)")
 st.caption(
@@ -411,15 +493,14 @@ def rebuild_co_weights(current_cos: list[str]) -> dict[str, float]:
     for k in stale_keys:
         del st.session_state[k]
 
-    equal_pct = max(5, int(100 / max(len(current_cos), 1)))
+    equal_pct = round(100.0 / max(len(current_cos), 1), 1)
     weights = {}
     for c in current_cos:
         val = st.session_state.get(f"w_co_{c}", equal_pct)
         st.session_state[f"w_co_{c}"] = val
-        weights[c] = val
+        weights[c] = float(val)
 
-    tot = max(sum(weights.values()), 1)
-    return {c: v / tot for c, v in weights.items()}
+    return weights
 
 # Substep 1.1: UI Controls (Preset dropdown 50/100, Sub-questions input, Weightage sliders)
 col_preset, col_subq = st.columns([1.5, 1.5])
@@ -554,32 +635,34 @@ with st.expander("⚖️ Bloom's Taxonomy & Course Outcome Weightage Sliders", e
     with col_bt_w:
         st.markdown("**Bloom's Taxonomy (BT) Cognitive Band Weightage (%)**")
         st.caption("Standard target ranges: L1–L2 (30–40%), L3–L4 (30–40%), L5–L6 (10–20%)")
-        w_l12 = st.slider("L1–L2 (Remember / Understand) %", min_value=10, max_value=60, value=int(st.session_state.get("w_l12", 40)), step=5)
-        w_l34 = st.slider("L3–L4 (Apply / Analyze) %", min_value=10, max_value=60, value=int(st.session_state.get("w_l34", 40)), step=5)
-        w_l56 = st.slider("L5–L6 (Evaluate / Create) %", min_value=5, max_value=40, value=int(st.session_state.get("w_l56", 20)), step=5)
+        w_l12 = st.slider("L1–L2 (Remember / Understand) %", min_value=0.0, max_value=100.0, value=float(st.session_state.get("w_l12", 40.0)), step=1.0)
+        w_l34 = st.slider("L3–L4 (Apply / Analyze) %", min_value=0.0, max_value=100.0, value=float(st.session_state.get("w_l34", 40.0)), step=1.0)
+        w_l56 = st.slider("L5–L6 (Evaluate / Create) %", min_value=0.0, max_value=100.0, value=float(st.session_state.get("w_l56", 20.0)), step=1.0)
         st.session_state.w_l12 = w_l12
         st.session_state.w_l34 = w_l34
         st.session_state.w_l56 = w_l56
 
-        tot_bt_w = w_l12 + w_l34 + w_l56
-        if tot_bt_w != 100:
-            st.caption(f"Current BT total: {tot_bt_w}% (will be normalized proportionally)")
+        tot_bt_w = round(w_l12 + w_l34 + w_l56, 3)
+        st.info(f"📊 Running Total (Bloom's): **{tot_bt_w:g}%** / 100%")
 
     with col_co_w:
         st.markdown("**Course Outcomes (CO) Weightage (%)**")
         st.caption("Allocate percentage emphasis across syllabus Course Outcomes.")
         co_weights_input = {}
-        equal_pct = max(5, int(100 / max(len(available_cos), 1)))
+        equal_pct = round(100.0 / max(len(available_cos), 1), 1)
         for c in available_cos:
             saved_val = st.session_state.get(f"w_co_{c}", equal_pct)
-            co_weights_input[c] = st.slider(f"{c} Weightage %", min_value=5, max_value=100, value=int(saved_val), step=5, key=f"slider_co_{c}")
+            co_weights_input[c] = st.slider(f"{c} Weightage %", min_value=0.0, max_value=100.0, value=float(saved_val), step=1.0, key=f"slider_co_{c}")
             st.session_state[f"w_co_{c}"] = co_weights_input[c]
 
-        tot_co_w = sum(co_weights_input.values())
-        if tot_co_w != 100:
-            st.caption(f"Current CO total: {tot_co_w}% (will be normalized proportionally)")
+        tot_co_w = round(sum(co_weights_input.values()), 3)
+        st.info(f"📊 Running Total (COs): **{tot_co_w:g}%** / 100%")
 
-# Show any blueprint warnings
+# Show any blueprint warnings or weightage apply errors
+if st.session_state.get("weightage_validation_errors"):
+    for err in st.session_state.weightage_validation_errors:
+        st.error(err)
+
 if st.session_state.get("bp_warnings"):
     for w in st.session_state.bp_warnings:
         st.warning(w)
@@ -598,38 +681,62 @@ with col_p1:
     if not can_apply:
         st.caption(f"⚠️ {apply_help}")
     if btn_apply:
-        tot_bt_val = max(w_l12 + w_l34 + w_l56, 1)
-        eff_bt_weights = {
-            "L1-L2": w_l12 / tot_bt_val,
-            "L3-L4": w_l34 / tot_bt_val,
-            "L5-L6": w_l56 / tot_bt_val,
+        bt_input_map = {
+            "L1-L2": float(w_l12),
+            "L3-L4": float(w_l34),
+            "L5-L6": float(w_l56),
         }
-        eff_co_weights = rebuild_co_weights(valid_cos)
-        st.session_state.target_weights = {"bt": eff_bt_weights, "co": eff_co_weights}
+        co_input_map = {c: float(co_weights_input.get(c, 0.0)) for c in valid_cos}
 
-        try:
-            if "25" in selected_preset:
-                st.session_state.slots = get_25_mark_blueprint(valid_cos)
-                st.session_state.selected_preset_idx = 2
-                st.session_state.bp_warnings = []
-            else:
-                preset_obj = make_preset(
-                    name=selected_preset,
-                    units=num_preset_units,
-                    marks_per_unit=target_unit_marks,
-                    options=2 if (is_100_choice or "Custom" in selected_preset) else 1,
-                    sub_marks=unit_sub_marks,
-                )
-                bp = build_blueprint(
-                    preset=preset_obj,
-                    bt_weights=eff_bt_weights,
-                    co_weights=eff_co_weights,
-                    outcomes=valid_cos,
-                    seed=42,
-                )
-                st.session_state.slots = bp["slots"]
-                st.session_state.selected_preset_idx = 1 if is_100_choice else (0 if "50" in selected_preset else 3)
-                st.session_state.bp_warnings = bp.get("warnings", [])
+        valid_weights, weight_errors = validate_weightage_totals(
+            co_weights=co_input_map,
+            bt_weights=bt_input_map,
+            existing_cos=valid_cos,
+            tolerance=0.01,
+        )
+        if not valid_weights:
+            st.session_state.weightage_validation_errors = weight_errors
+            for err in weight_errors:
+                st.error(err)
+        else:
+            if "weightage_validation_errors" in st.session_state:
+                del st.session_state.weightage_validation_errors
+            eff_bt_weights = {k: v / 100.0 for k, v in bt_input_map.items()}
+            eff_co_weights = {k: v / 100.0 for k, v in co_input_map.items()}
+            st.session_state.target_weights = {"bt": eff_bt_weights, "co": eff_co_weights}
+
+            try:
+                if "25" in selected_preset:
+                    st.session_state.slots = get_25_mark_blueprint(valid_cos)
+                    st.session_state.selected_preset_idx = 2
+                    st.session_state.bp_warnings = []
+                else:
+                    preset_obj = make_preset(
+                        name=selected_preset,
+                        units=num_preset_units,
+                        marks_per_unit=target_unit_marks,
+                        options=2 if (is_100_choice or "Custom" in selected_preset) else 1,
+                        sub_marks=unit_sub_marks,
+                    )
+                    bp = build_blueprint(
+                        preset=preset_obj,
+                        bt_weights=eff_bt_weights,
+                        co_weights=eff_co_weights,
+                        outcomes=valid_cos,
+                        seed=42,
+                    )
+                    st.session_state.slots = bp["slots"]
+                    st.session_state.selected_preset_idx = 1 if is_100_choice else (0 if "50" in selected_preset else 3)
+                    st.session_state.bp_warnings = bp.get("warnings", [])
+
+                # Clear stale slot widget keys and bump version
+                st.session_state.slots_version = st.session_state.get("slots_version", 0) + 1
+                for k in list(st.session_state.keys()):
+                    if k.startswith("slot_"):
+                        del st.session_state[k]
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
             st.rerun()
         except ValueError as e:
             st.error(str(e))
@@ -640,39 +747,62 @@ with col_p2:
         st.session_state.slots = get_50_mark_blueprint(valid_cos)
         st.session_state.selected_preset_idx = 0
         st.session_state.bp_warnings = []
+        st.session_state.slots_version = st.session_state.get("slots_version", 0) + 1
+        for k in list(st.session_state.keys()):
+            if k.startswith("slot_"):
+                del st.session_state[k]
         st.rerun()
 
 with col_p3:
     if st.button("🔄 Reset to Blank", use_container_width=True):
         st.session_state.slots = [
             {
-                "part": "Part A",
+                "unit": 1,
+                "question_no": 1,
                 "id": "1",
                 "co": available_cos[0],
                 "level": "L1",
                 "knowledge_dimension": "Factual",
-                "marks": 2,
+                "marks": 5,
             }
         ]
         st.session_state.selected_preset_idx = 3
+        st.session_state.slots_version = st.session_state.get("slots_version", 0) + 1
+        for k in list(st.session_state.keys()):
+            if k.startswith("slot_"):
+                del st.session_state[k]
         st.rerun()
 
 # Calculate Blueprint Statistics
 stats = calculate_blueprint_stats(st.session_state.slots)
 total_marks = stats["total_marks"]
-total_questions = stats["total_questions"]
-part_marks = stats["part_marks"]
+attempted_m = stats.get("attempted_marks", total_marks)
+offered_m = stats.get("offered_marks", total_marks)
+is_choice_paper = stats.get("is_choice", False)
 
-badge_class = "badge-success" if total_marks == 50 else "badge-warning"
-mark_target_label = "✅ Target 50 Marks Met" if total_marks == 50 else f"Target: 50 Marks (Current: {total_marks})"
+if is_choice_paper:
+    mark_target_label = f"Attempted: {attempted_m}m / Offered: {offered_m}m"
+    badge_class = "badge-success" if attempted_m in (50, 100) else "badge-warning"
+else:
+    mark_target_label = f"Total: {total_marks} Marks"
+    badge_class = "badge-success" if total_marks in (25, 50, 100) else "badge-warning"
+
+unit_offered = stats.get("unit_marks", {})
+unit_attempted = stats.get("unit_attempted_marks", {})
+
+unit_badges = "".join(
+    f'<span class="metric-badge"><b>Unit {u}:</b> {unit_attempted.get(u, m // 2)}m / {m}m</span> '
+    if is_choice_paper else
+    f'<span class="metric-badge"><b>Unit {u}:</b> {m}m</span> '
+    for u, m in sorted(unit_offered.items())
+)
 
 st.markdown(
     f"""
     <div style="margin-top: 0.6rem; margin-bottom: 0.8rem;">
-        <span class="metric-badge {badge_class}"><b>Total Marks:</b> {total_marks} ({mark_target_label})</span>
-        <span class="metric-badge"><b>Total Slots:</b> {total_questions}</span>
-        <span class="metric-badge"><b>Part A:</b> {part_marks.get('Part A', 0)} Marks</span>
-        <span class="metric-badge"><b>Part B:</b> {part_marks.get('Part B', 0)} Marks</span>
+        <span class="metric-badge {badge_class}"><b>Exam Structure:</b> {mark_target_label}</span>
+        <span class="metric-badge"><b>Total Slots:</b> {len(st.session_state.slots)}</span>
+        {unit_badges}
     </div>
     """,
     unsafe_allow_html=True,
@@ -718,11 +848,11 @@ bt_labels = {
 kd_options = KNOWLEDGE_DIMENSIONS
 
 # Slots Table Header
-hdr_col1, hdr_col2, hdr_col3, hdr_col4, hdr_col5, hdr_col6, hdr_col7 = st.columns([1.3, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
+hdr_col1, hdr_col2, hdr_col3, hdr_col4, hdr_col5, hdr_col6, hdr_col7 = st.columns([1.0, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
 with hdr_col1:
-    st.caption("Section / Part")
+    st.caption("Unit")
 with hdr_col2:
-    st.caption("Q.No / Subpart")
+    st.caption("Q.No")
 with hdr_col3:
     st.caption("Outcome (CO)")
 with hdr_col4:
@@ -734,19 +864,19 @@ with hdr_col6:
 with hdr_col7:
     st.caption("Action")
 
+v = st.session_state.get("slots_version", 0)
 slots_to_remove = []
 for j, slot in enumerate(st.session_state.slots):
-    col_part, col_id, col_co, col_bt, col_kd, col_marks, col_del_slot = st.columns([1.3, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
+    col_unit, col_id, col_co, col_bt, col_kd, col_marks, col_del_slot = st.columns([1.0, 1.0, 1.4, 2.0, 1.8, 1.0, 0.6])
 
-    with col_part:
-        part_options = ["Part A", "Part B", "Part C"]
-        curr_part = slot.get("part", "Part A")
-        part_idx = part_options.index(curr_part) if curr_part in part_options else 0
-        slot["part"] = st.selectbox(
-            "Section",
-            options=part_options,
-            index=part_idx,
-            key=f"slot_part_{j}",
+    with col_unit:
+        slot["unit"] = st.number_input(
+            "Unit",
+            min_value=1,
+            max_value=10,
+            value=int(slot.get("unit", 1)),
+            step=1,
+            key=f"slot_unit_{v}_{j}",
             label_visibility="collapsed",
         )
 
@@ -754,7 +884,7 @@ for j, slot in enumerate(st.session_state.slots):
         slot["id"] = st.text_input(
             "Q.No",
             value=str(slot.get("id", f"{j+1}")),
-            key=f"slot_id_{j}",
+            key=f"slot_id_{v}_{j}",
             label_visibility="collapsed",
             placeholder="e.g. 1(a)",
         )
@@ -766,7 +896,7 @@ for j, slot in enumerate(st.session_state.slots):
             "Outcome",
             options=available_cos,
             index=co_index,
-            key=f"slot_co_{j}",
+            key=f"slot_co_{v}_{j}",
             label_visibility="collapsed",
         )
 
@@ -778,7 +908,7 @@ for j, slot in enumerate(st.session_state.slots):
             options=bt_options,
             format_func=lambda x: bt_labels.get(x, x),
             index=lvl_index,
-            key=f"slot_bt_{j}",
+            key=f"slot_bt_{v}_{j}",
             label_visibility="collapsed",
         )
 
@@ -789,7 +919,7 @@ for j, slot in enumerate(st.session_state.slots):
             "Knowledge Dimension",
             options=kd_options,
             index=kd_index,
-            key=f"slot_kd_{j}",
+            key=f"slot_kd_{v}_{j}",
             label_visibility="collapsed",
         )
 
@@ -801,13 +931,13 @@ for j, slot in enumerate(st.session_state.slots):
                 max_value=50,
                 value=int(slot.get("marks", 2)),
                 step=1,
-                key=f"slot_marks_{j}",
+                key=f"slot_marks_{v}_{j}",
                 label_visibility="collapsed",
             )
         )
 
     with col_del_slot:
-        if st.button("🗑️", key=f"del_slot_{j}", help="Delete question slot"):
+        if st.button("🗑️", key=f"del_slot_{v}_{j}", help="Delete question slot"):
             slots_to_remove.append(j)
 
 if slots_to_remove:
@@ -819,7 +949,7 @@ col_add_q, _ = st.columns([2, 5])
 with col_add_q:
     if st.button("➕ Add question slot", key="btn_add_slot"):
         st.session_state.slots.append({
-            "part": "Part B",
+            "unit": 1,
             "id": f"{len(st.session_state.slots) + 1}(a)",
             "co": available_cos[0],
             "level": "L3",
@@ -831,14 +961,16 @@ with col_add_q:
 st.divider()
 
 # -----------------------------------------------------------------------------
-# Section 3: File Upload & Chapter Selection (Task Steps 1, 2, 3, 4)
+# Stage 3: File Upload & Chapter Selection (Task Steps 1, 2, 3, 4)
 # -----------------------------------------------------------------------------
 st.subheader("3. Document Ingestion & Chapter Selection")
 
-uploaded_pdf = st.file_uploader(
-    "Upload Textbook PDF",
+uploaded_pdfs = st.file_uploader(
+    "Upload Textbook PDF(s)",
     type=["pdf"],
-    help="Upload the reference textbook or course material in PDF format.",
+    accept_multiple_files=True,
+    key="textbook_uploader",
+    help="Upload one or more reference textbooks or course materials in PDF format.",
 )
 
 filtered_chunks = []
@@ -846,11 +978,50 @@ selected_chapters = []
 selected_sections = None
 page_range = None
 can_generate = False
+library = {"books": {}, "chunks": []}
 
-if uploaded_pdf:
-    file_bytes = uploaded_pdf.getvalue()
-    raw_chunks = get_cached_chunks(file_bytes, uploaded_pdf.name)
-    st.session_state.course_title = os.path.splitext(uploaded_pdf.name)[0].replace("-", " ").replace("_", " ").title()
+if uploaded_pdfs:
+    upload_dir = Path(".cache/uploads")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
+    titles = []
+    for idx, up_file in enumerate(uploaded_pdfs, 1):
+        file_bytes = up_file.getvalue()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()[:12]
+        orig_stem = Path(up_file.name).stem
+        clean_book_name = re.sub(r"^[0-9a-f]{8,64}[_-]+", "", orig_stem, flags=re.I).strip("_- ")
+        clean_book_name = clean_book_name.replace("-", " ").replace("_", " ").strip()
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", up_file.name)
+        save_path = upload_dir / f"{file_hash}_{safe_name}"
+        if not save_path.exists() or save_path.stat().st_size != len(file_bytes):
+            with open(save_path, "wb") as f:
+                f.write(file_bytes)
+        saved_paths.append(str(save_path))
+        titles.append(f"{idx} {clean_book_name}")
+
+    library = load_library(saved_paths, titles=titles)
+    raw_chunks = library.get("chunks", [])
+    books = library.get("books", {})
+
+    if len(uploaded_pdfs) == 1:
+        single_binfo = list(books.values())[0] if books else None
+        st.session_state.course_title = single_binfo.get("display_label", single_binfo.get("title", titles[0])) if single_binfo else titles[0]
+    else:
+        book_titles = [binfo.get("display_label", binfo["title"]) for binfo in books.values()]
+        st.session_state.course_title = " & ".join(book_titles[:2])
+
+    st.markdown(f"##### 📚 Uploaded Textbooks ({len(books)})")
+    b_cols = st.columns(min(max(len(books), 1), 4))
+    for i, (bid, binfo) in enumerate(books.items()):
+        with b_cols[i % len(b_cols)]:
+            p_min, p_max = binfo.get("page_range", (1, 1))
+            n_ch = len(binfo.get("chapters", []))
+            st.metric(
+                label=binfo.get("display_label", binfo.get("title", bid)),
+                value=f"{binfo.get('n_chunks', 0)} chunks",
+                delta=f"{n_ch} chaps (pp. {p_min}–{p_max})",
+                delta_color="off",
+            )
 
     chapter_metadata = get_chapter_metadata(raw_chunks)
 
@@ -920,6 +1091,51 @@ if uploaded_pdf:
             st.error("⚠️ **Select at least one chapter** to enable question paper generation.")
             can_generate = False
 
+        # Unit-to-Textbook Mapping
+        active_units = sorted(list({s["unit"] for s in st.session_state.slots if "unit" in s}))
+        if not active_units:
+            active_units = [1, 2, 3, 4, 5]
+
+        if "unit_sources" not in st.session_state or not st.session_state.unit_sources:
+            if st.session_state.scheme and st.session_state.scheme.get("unit_sources"):
+                st.session_state.unit_sources = dict(st.session_state.scheme["unit_sources"])
+            elif len(books) > 1:
+                st.session_state.unit_sources = suggest_unit_sources(library, active_units)
+
+        with st.expander("🗺️ Unit-to-Textbook Mapping (Optional)", expanded=(len(books) > 1)):
+            st.caption("Map which textbook(s) and chapter(s) each exam unit draws questions from.")
+            current_sources = st.session_state.get("unit_sources") or {}
+            updated_sources = {}
+            for u in active_units:
+                u_sources = current_sources.get(u) or {}
+                st.markdown(f"**Unit {u} Sources:**")
+                u_b_cols = st.columns(min(max(len(books), 1), 3))
+                unit_book_map = {}
+                for b_idx, (bid, binfo) in enumerate(books.items()):
+                    with u_b_cols[b_idx % len(u_b_cols)]:
+                        b_chaps = binfo.get("chapters", [])
+                        def_chaps = u_sources.get(bid) if isinstance(u_sources, dict) else None
+                        valid_def = [c for c in def_chaps if c in b_chaps] if def_chaps else []
+                        book_lbl = binfo.get("display_label", binfo.get("title", bid))
+                        sel_for_b = st.multiselect(
+                            f"{book_lbl}",
+                            options=b_chaps,
+                            default=valid_def,
+                            key=f"u_{u}_b_{bid}_chaps",
+                            help=f"Select chapters in {book_lbl} for Unit {u}. Leave empty to exclude this book from Unit {u}.",
+                        )
+                        if sel_for_b:
+                            unit_book_map[bid] = sel_for_b
+                if unit_book_map:
+                    updated_sources[u] = unit_book_map
+                else:
+                    updated_sources[u] = {bid: None for bid in books}
+
+            st.session_state.unit_sources = updated_sources
+            source_warnings = validate_unit_sources(library, updated_sources)
+            for sw in source_warnings:
+                st.warning(f"⚠️ {sw}")
+
     else:
         st.warning("⚠️ No chapter headings detected in document TOC. Falling back to page range selection.")
         all_pages = [c.get("page_start", 1) for c in raw_chunks] + [c.get("page_end", 1) for c in raw_chunks]
@@ -949,7 +1165,7 @@ if uploaded_pdf:
             f"Some questions might be duplicated or left unfilled."
         )
 
-col_gen, col_gen_msg = st.columns([2.5, 4.5])
+col_gen, col_gen_force, col_gen_msg = st.columns([2.5, 2.0, 2.5])
 with col_gen:
     generate_disabled = (not can_generate) or (not outcomes_valid)
     gen_help_text = outcome_err_msg if not outcomes_valid else ("Select at least one chapter to enable." if not can_generate else "Generate exam questions")
@@ -960,13 +1176,19 @@ with col_gen:
         disabled=generate_disabled,
         help=gen_help_text,
     )
+with col_gen_force:
+    force_regenerate = st.checkbox(
+        "⚡ Force Regenerate",
+        value=False,
+        help="Bypass generation cache and regenerate fresh questions from the LLM.",
+    )
 with col_gen_msg:
     if not outcomes_valid:
         st.caption(f"⚠️ {outcome_err_msg}")
 
 if generate_clicked:
-    if not uploaded_pdf:
-        st.error("Please upload a textbook PDF before generating.")
+    if not uploaded_pdfs:
+        st.error("Please upload at least one textbook PDF before generating.")
     elif not outcomes_valid:
         st.error(outcome_err_msg)
     elif not st.session_state.slots:
@@ -974,6 +1196,12 @@ if generate_clicked:
     elif not filtered_chunks:
         st.error("No text chunks match your chapter/section selection.")
     else:
+        if not use_mock:
+            probe_client = OllamaClient(model=model_name)
+            if not probe_client.is_up():
+                st.error("⚠️ **Ollama service is not reachable.** Please ensure Ollama is running (`ollama serve`) or switch to 'Mock Client' in the sidebar.")
+                st.stop()
+
         with st.status("Executing Generation Pipeline...", expanded=True) as status_box:
             status_box.write(f"📄 Filtered to {len(filtered_chunks)} chunk(s) from selected chapter(s)...")
 
@@ -997,14 +1225,18 @@ if generate_clicked:
             # 4. Generate by Slots (aligned with Revised Bloom's Taxonomy)
             status_box.write("✍️ Generating questions matching Revised Bloom's Taxonomy & blueprint slots...")
             progress_bar = st.progress(0.0)
+            status_text = st.empty()
             total_slots = len(st.session_state.slots)
             progress_state = {"count": 0}
 
             def on_progress_callback(rec):
                 progress_state["count"] += 1
-                progress_bar.progress(min(progress_state["count"] / max(total_slots, 1), 1.0))
+                cnt = progress_state["count"]
+                progress_bar.progress(min(cnt / max(total_slots, 1), 1.0))
+                s_id = rec.get("slot_id") or rec.get("id") or f"Slot {cnt}"
+                status_text.markdown(f"⏳ **Generated {cnt} of {total_slots}** question slots (completed `{s_id}`)...")
 
-            unit_sources = st.session_state.scheme.get("unit_sources") if st.session_state.scheme else None
+            unit_sources = st.session_state.get("unit_sources") or (st.session_state.scheme.get("unit_sources") if st.session_state.scheme else None)
             results = generate_paper_by_slots(
                 chunks=scored_chunks,
                 slots=st.session_state.slots,
@@ -1012,14 +1244,17 @@ if generate_clicked:
                 seed=42,
                 on_progress=on_progress_callback,
                 unit_sources=unit_sources,
+                workers=config.GENERATION_WORKERS,
+                force_regenerate=force_regenerate,
             )
             progress_bar.progress(1.0)
+            status_text.empty()
             results["covered_chapters"] = selected_chapters
             st.session_state.results = results
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
 # -----------------------------------------------------------------------------
-# Section 4: Results Display & Export (Step 1.2, 2.1, 2.2)
+# Stage 4: Results Display & Export (Step 1.2, 2.1, 2.2)
 # -----------------------------------------------------------------------------
 if st.session_state.results:
     res = st.session_state.results
@@ -1046,7 +1281,7 @@ if st.session_state.results:
     if questions:
         table_data = [
             {
-                "Section": q.get("part", "General"),
+                "Unit": f"Unit {q.get('unit', 1)}",
                 "S.No": q.get("id", ""),
                 "Question": q.get("question", ""),
                 "Marks": q.get("marks", ""),
@@ -1068,7 +1303,7 @@ if st.session_state.results:
             st.dataframe(
                 df,
                 column_config={
-                    "Section": st.column_config.TextColumn("Section", width="small"),
+                    "Unit": st.column_config.TextColumn("Unit", width="small"),
                     "S.No": st.column_config.TextColumn("S.No", width="small"),
                     "Question": st.column_config.TextColumn("Question Text", width="large"),
                     "Marks": st.column_config.NumberColumn("Marks", width="small"),
@@ -1135,31 +1370,29 @@ if st.session_state.results:
                         df_bt = pd.DataFrame(bt_tbl[1:], columns=bt_tbl[0])
                         st.dataframe(df_bt, hide_index=True, use_container_width=True)
 
-        docx_data = create_docx_exam_paper(
-            questions=questions,
+        outcomes_tuple = tuple(sorted(outcomes_map.items()))
+        chaps_tuple = tuple(covered_chaps) if covered_chaps else None
+        docx_data = get_cached_docx_paper(
+            questions_data=questions,
             course_name=course_title,
             subject_code=st.session_state.subject_code,
-            outcomes=outcomes_map,
+            outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
-            covered_chapters=covered_chaps,
-            include_source=True,
-            include_knowledge_dim=True,
+            covered_chaps_tuple=chaps_tuple,
             include_answers=include_answers,
             include_totals=add_totals,
-            totals_summary=totals_summary,
+            totals_summary_data=totals_summary,
         )
-        pdf_data = create_pdf_exam_paper(
-            questions=questions,
+        pdf_data = get_cached_pdf_paper(
+            questions_data=questions,
             course_name=course_title,
             subject_code=st.session_state.subject_code,
-            outcomes=outcomes_map,
+            outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
-            covered_chapters=covered_chaps,
-            include_source=True,
-            include_knowledge_dim=True,
+            covered_chaps_tuple=chaps_tuple,
             include_answers=include_answers,
             include_totals=add_totals,
-            totals_summary=totals_summary,
+            totals_summary_data=totals_summary,
         )
         csv_data = df.to_csv(index=False).encode("utf-8")
 

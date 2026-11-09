@@ -29,6 +29,12 @@ def ingest(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLAP_WORDS,
         kept_nums = {p.page_number for p in fres.kept_pages}
         if kept_nums:
             lines = [l for l in lines if l["page"] in kept_nums]
+            if toc:
+                from ingestion.heading_detect import is_non_content_title
+                toc = [
+                    entry for entry in toc
+                    if len(entry) >= 3 and entry[2] in kept_nums and not is_non_content_title(entry[1])
+                ]
 
     heads = detect_headings(lines, toc)
     chunks = build_chunks(lines, heads, max_words, overlap_words, min_words)
@@ -58,6 +64,12 @@ def ingest_with_report(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLA
     kept_nums = {p.page_number for p in fres.kept_pages}
     if kept_nums:
         lines = [l for l in lines if l["page"] in kept_nums]
+        if toc:
+            from ingestion.heading_detect import is_non_content_title
+            toc = [
+                entry for entry in toc
+                if len(entry) >= 3 and entry[2] in kept_nums and not is_non_content_title(entry[1])
+            ]
 
     heads = detect_headings(lines, toc)
     chunks = build_chunks(lines, heads, max_words, overlap_words, min_words)

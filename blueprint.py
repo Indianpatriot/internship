@@ -120,6 +120,46 @@ def validate_outcomes(outcomes: Any, require_desc: bool = False) -> tuple[bool, 
     return True, ""
 
 
+def validate_weightage_totals(
+    co_weights: dict[str, float],
+    bt_weights: dict[str, float],
+    existing_cos: list[str],
+    tolerance: float = 0.01,
+) -> tuple[bool, list[str]]:
+    """Validate that existing CO weightages and BT band weightages both sum to exactly 100%.
+
+    Args:
+        co_weights: Mapping of CO code -> percentage (e.g. {"CO1": 25.0, ...}).
+        bt_weights: Mapping of BT band -> percentage (e.g. {"L1-L2": 40.0, ...}).
+        existing_cos: List of currently existing CO codes to include in sum.
+        tolerance: Float tolerance for 100% check (default 0.01).
+
+    Returns:
+        (ok, errors): ok is True only if both totals equal 100 (within tolerance).
+    """
+    errors: list[str] = []
+
+    # 1. Sum only existing COs
+    co_sum = sum(float(co_weights.get(c, 0.0)) for c in existing_cos)
+    if abs(co_sum - 100.0) > tolerance:
+        diff = co_sum - 100.0
+        sign = "+" if diff > 0 else ""
+        errors.append(
+            f"CO weightages total {co_sum:g}%. They must total exactly 100% ({sign}{diff:g}%). Adjust and apply again."
+        )
+
+    # 2. Sum BT bands
+    bt_sum = sum(float(v) for v in bt_weights.values())
+    if abs(bt_sum - 100.0) > tolerance:
+        diff = bt_sum - 100.0
+        sign = "+" if diff > 0 else ""
+        errors.append(
+            f"Bloom's weightages total {bt_sum:g}%. They must total exactly 100% ({sign}{diff:g}%). Adjust and apply again."
+        )
+
+    return len(errors) == 0, errors
+
+
 def build_blueprint(
     preset: Optional[Any] = None,
     total_marks: Optional[int] = None,
@@ -329,7 +369,14 @@ def build_blueprint(
                             # Single list applied to all questions
                             q_sub_marks = list(sub_question_marks) if sub_question_marks else [q_expected_marks]
                     elif isinstance(sub_question_marks, dict):
-                        if q_no in sub_question_marks:
+                        # If keys are unit numbers (e.g. 1..N for N units), map by unit
+                        if u_val in sub_question_marks and (
+                            set(sub_question_marks.keys()).issubset(set(unit_list))
+                            or (q_per_unit > 1 and max((k for k in sub_question_marks if isinstance(k, int)), default=0) <= len(unit_list))
+                        ):
+                            val = sub_question_marks[u_val]
+                            q_sub_marks = list(val) if val else [q_expected_marks]
+                        elif q_no in sub_question_marks:
                             val = sub_question_marks[q_no]
                             q_sub_marks = list(val) if val else [q_expected_marks]
                         elif u_val in sub_question_marks:
@@ -345,7 +392,15 @@ def build_blueprint(
                         elif isinstance(sub_question_counts, list) and q_no - 1 < len(sub_question_counts):
                             sq_count = sub_question_counts[q_no - 1]
                         elif isinstance(sub_question_counts, dict):
-                            sq_count = sub_question_counts.get(q_no, sub_question_counts.get(u_val))
+                            if u_val in sub_question_counts and (
+                                set(sub_question_counts.keys()).issubset(set(unit_list))
+                                or (q_per_unit > 1 and max((k for k in sub_question_counts if isinstance(k, int)), default=0) <= len(unit_list))
+                            ):
+                                sq_count = sub_question_counts[u_val]
+                            elif q_no in sub_question_counts:
+                                sq_count = sub_question_counts[q_no]
+                            else:
+                                sq_count = sub_question_counts.get(u_val)
                     elif "sub_question_marks" in preset_config and q_no in preset_config["sub_question_marks"]:
                         q_sub_marks = list(preset_config["sub_question_marks"][q_no])
                     elif "sub_question_counts" in preset_config:
@@ -416,8 +471,18 @@ def build_blueprint(
 
     allocated_bt = {b: 0 for b in BT_BANDS}
     allocated_co = {c: 0 for c in all_cos}
+    allocated_kd = {kd: 0 for kd in KNOWLEDGE_DIMENSIONS}
 
     band_level_alternation = {b: 0 for b in BT_BANDS}
+
+    KD_BY_LEVEL = {
+        "L1": ["Factual", "Conceptual"],
+        "L2": ["Conceptual", "Factual"],
+        "L3": ["Procedural", "Conceptual"],
+        "L4": ["Procedural", "Conceptual"],
+        "L5": ["Metacognitive", "Procedural"],
+        "L6": ["Metacognitive", "Procedural"],
+    }
 
     for s in sorted_slots:
         m = s["marks"]
@@ -435,6 +500,12 @@ def build_blueprint(
         band_level_alternation[best_band] = (lvl_idx + 1) % len(BAND_LEVELS[best_band])
         s["level"] = assigned_level
         s["_band"] = best_band
+
+        # Select KD matching level
+        candidates_kd = KD_BY_LEVEL.get(assigned_level, KNOWLEDGE_DIMENSIONS)
+        assigned_kd = min(candidates_kd, key=lambda k: allocated_kd[k])
+        allocated_kd[assigned_kd] += m
+        s["knowledge_dimension"] = assigned_kd
 
         # Select CO
         if cleaned_unit_co_map and u in cleaned_unit_co_map and cleaned_unit_co_map[u]:
@@ -488,9 +559,8 @@ def build_blueprint(
                     "marks": s["marks"],
                     "alternative_group": alt_grp,
                     "id": slot_id,
-                    "part": f"Unit {u}" if is_choice else ("Part A" if s["marks"] <= 5 else "Part B"),
-                    "knowledge_dimension": "Conceptual",
-                    "kd": "Conceptual",
+                    "knowledge_dimension": s.get("knowledge_dimension", "Conceptual"),
+                    "kd": s.get("knowledge_dimension", "Conceptual"),
                 }
                 final_slots.append(slot_rec)
         else:
@@ -510,9 +580,8 @@ def build_blueprint(
                     "marks": p_slot["marks"],
                     "alternative_group": alt_grp,
                     "id": slot_id,
-                    "part": f"Unit {u}" if is_choice else ("Part A" if p_slot["marks"] <= 5 else "Part B"),
-                    "knowledge_dimension": "Conceptual",
-                    "kd": "Conceptual",
+                    "knowledge_dimension": p_slot.get("knowledge_dimension", "Conceptual"),
+                    "kd": p_slot.get("knowledge_dimension", "Conceptual"),
                 }
                 final_slots.append(slot_rec)
 
@@ -587,10 +656,7 @@ def build_blueprint(
 def get_50_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
     """Return standard 50-mark exam paper blueprint aligned with Revised Bloom's Taxonomy.
 
-    Structure:
-    - Part A: 5 questions x 2 marks = 10 marks (L1, L2 foundation across Factual, Conceptual, Procedural)
-    - Part B: 4 main questions with (a) and (b) subparts = 40 marks (L3-L6 higher order across Conceptual, Procedural, Metacognitive)
-    Total = 50 marks.
+    Structure: 5 units x 10 marks = 50 marks across Factual, Conceptual, Procedural, Metacognitive dimensions.
     """
     if not cos:
         cos = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
@@ -601,123 +667,115 @@ def get_50_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
         return cos[index % num_cos]
 
     slots = [
-        # --- PART A: Short Answer (10 Marks) ---
+        # Unit 1: 10 marks
         {
-            "part": "Part A",
-            "id": "1",
+            "unit": 1,
+            "question_no": 1,
+            "sub_index": 1,
+            "id": "1(a)",
             "co": co_at(0),
             "level": "L1",
             "knowledge_dimension": "Factual",
-            "marks": 2,
+            "marks": 5,
             "desc": "Short Answer (Terminology / Factual Recall)",
         },
         {
-            "part": "Part A",
-            "id": "2",
+            "unit": 1,
+            "question_no": 1,
+            "sub_index": 2,
+            "id": "1(b)",
             "co": co_at(1),
-            "level": "L1",
+            "level": "L2",
             "knowledge_dimension": "Conceptual",
-            "marks": 2,
-            "desc": "Short Answer (Definition / Conceptual Recall)",
+            "marks": 5,
+            "desc": "Explanation & Principles",
+        },
+        # Unit 2: 10 marks
+        {
+            "unit": 2,
+            "question_no": 2,
+            "sub_index": 1,
+            "id": "2(a)",
+            "co": co_at(1),
+            "level": "L2",
+            "knowledge_dimension": "Conceptual",
+            "marks": 5,
+            "desc": "Concept Modeling",
         },
         {
-            "part": "Part A",
-            "id": "3",
+            "unit": 2,
+            "question_no": 2,
+            "sub_index": 2,
+            "id": "2(b)",
             "co": co_at(2 if num_cos > 2 else 0),
-            "level": "L2",
-            "knowledge_dimension": "Conceptual",
-            "marks": 2,
-            "desc": "Short Answer (Explanation / Principle)",
-        },
-        {
-            "part": "Part A",
-            "id": "4",
-            "co": co_at(3 if num_cos > 3 else 1),
-            "level": "L2",
-            "knowledge_dimension": "Procedural",
-            "marks": 2,
-            "desc": "Short Answer (Process Clarification)",
-        },
-        {
-            "part": "Part A",
-            "id": "5",
-            "co": co_at(4 if num_cos > 4 else 0),
-            "level": "L2",
-            "knowledge_dimension": "Factual",
-            "marks": 2,
-            "desc": "Short Answer (Summary of Features)",
-        },
-        # --- PART B: Long Answer with subparts (a) & (b) (40 Marks) ---
-        # Question 6
-        {
-            "part": "Part B",
-            "id": "6(a)",
-            "co": co_at(0),
             "level": "L3",
             "knowledge_dimension": "Procedural",
             "marks": 5,
             "desc": "Procedure Application & Problem Solving",
         },
+        # Unit 3: 10 marks
         {
-            "part": "Part B",
-            "id": "6(b)",
-            "co": co_at(1),
-            "level": "L3",
-            "knowledge_dimension": "Conceptual",
-            "marks": 5,
-            "desc": "Conceptual Modeling & Demonstration",
-        },
-        # Question 7
-        {
-            "part": "Part B",
-            "id": "7(a)",
+            "unit": 3,
+            "question_no": 3,
+            "sub_index": 1,
+            "id": "3(a)",
             "co": co_at(2 if num_cos > 2 else 0),
+            "level": "L3",
+            "knowledge_dimension": "Procedural",
+            "marks": 5,
+            "desc": "Analytical Execution",
+        },
+        {
+            "unit": 3,
+            "question_no": 3,
+            "sub_index": 2,
+            "id": "3(b)",
+            "co": co_at(3 if num_cos > 3 else 1),
             "level": "L4",
             "knowledge_dimension": "Conceptual",
             "marks": 5,
             "desc": "Architectural Analysis & Differentiation",
         },
+        # Unit 4: 10 marks
         {
-            "part": "Part B",
-            "id": "7(b)",
-            "co": co_at(3 if num_cos > 3 else 1),
-            "level": "L4",
-            "knowledge_dimension": "Procedural",
-            "marks": 5,
-            "desc": "Pipeline Integration & Process Analysis",
-        },
-        # Question 8
-        {
-            "part": "Part B",
-            "id": "8(a)",
+            "unit": 4,
+            "question_no": 4,
+            "sub_index": 1,
+            "id": "4(a)",
             "co": co_at(0),
             "level": "L4",
             "knowledge_dimension": "Metacognitive",
             "marks": 5,
-            "desc": "Critical Deconstruction & Trade-off Assessment",
+            "desc": "Trade-off Assessment",
         },
         {
-            "part": "Part B",
-            "id": "8(b)",
+            "unit": 4,
+            "question_no": 4,
+            "sub_index": 2,
+            "id": "4(b)",
             "co": co_at(1),
             "level": "L5",
             "knowledge_dimension": "Procedural",
             "marks": 5,
             "desc": "Algorithm Efficiency Judgement",
         },
-        # Question 9
+        # Unit 5: 10 marks
         {
-            "part": "Part B",
-            "id": "9(a)",
+            "unit": 5,
+            "question_no": 5,
+            "sub_index": 1,
+            "id": "5(a)",
             "co": co_at(2 if num_cos > 2 else 0),
             "level": "L5",
             "knowledge_dimension": "Metacognitive",
             "marks": 5,
-            "desc": "Methodological Reflection & Validation",
+            "desc": "Methodological Reflection & Evaluation",
         },
         {
-            "part": "Part B",
-            "id": "9(b)",
+            "unit": 5,
+            "question_no": 5,
+            "sub_index": 2,
+            "id": "5(b)",
             "co": co_at(3 if num_cos > 3 else 1),
             "level": "L6",
             "knowledge_dimension": "Procedural",
@@ -729,7 +787,7 @@ def get_50_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
 
 
 def get_25_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
-    """Return 25-mark internal assessment / quiz blueprint."""
+    """Return 25-mark internal assessment blueprint across units."""
     if not cos:
         cos = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
 
@@ -739,20 +797,27 @@ def get_25_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
         return cos[index % num_cos]
 
     return [
-        {"part": "Part A", "id": "1", "co": co_at(0), "level": "L1", "knowledge_dimension": "Factual", "marks": 2},
-        {"part": "Part A", "id": "2", "co": co_at(1), "level": "L2", "knowledge_dimension": "Conceptual", "marks": 2},
-        {"part": "Part A", "id": "3", "co": co_at(0), "level": "L2", "knowledge_dimension": "Procedural", "marks": 2},
-        {"part": "Part B", "id": "4(a)", "co": co_at(0), "level": "L3", "knowledge_dimension": "Procedural", "marks": 5},
-        {"part": "Part B", "id": "4(b)", "co": co_at(1), "level": "L3", "knowledge_dimension": "Conceptual", "marks": 5},
-        {"part": "Part B", "id": "5(a)", "co": co_at(0), "level": "L4", "knowledge_dimension": "Conceptual", "marks": 5},
-        {"part": "Part B", "id": "5(b)", "co": co_at(1), "level": "L5", "knowledge_dimension": "Metacognitive", "marks": 4},
+        {"unit": 1, "id": "1", "co": co_at(0), "level": "L1", "knowledge_dimension": "Factual", "marks": 5},
+        {"unit": 1, "id": "2", "co": co_at(1), "level": "L2", "knowledge_dimension": "Conceptual", "marks": 5},
+        {"unit": 2, "id": "3(a)", "co": co_at(2 if num_cos > 2 else 0), "level": "L3", "knowledge_dimension": "Procedural", "marks": 5},
+        {"unit": 2, "id": "3(b)", "co": co_at(3 if num_cos > 3 else 1), "level": "L4", "knowledge_dimension": "Conceptual", "marks": 5},
+        {"unit": 3, "id": "4", "co": co_at(0), "level": "L5", "knowledge_dimension": "Metacognitive", "marks": 5},
     ]
 
 
 def calculate_blueprint_stats(slots: list[dict[str, Any]]) -> dict[str, Any]:
-    """Analyze blueprint slots for total marks, part distribution, BT spread, KD spread, and CO coverage."""
-    total_marks = sum(int(s.get("marks", 0)) for s in slots)
-    part_marks: dict[str, int] = {}
+    """Analyze blueprint slots for total marks, unit distribution, BT spread, KD spread, and CO coverage."""
+    from totals import _filter_attempted_questions
+
+    is_choice = any(bool(s.get("alternative_group")) for s in slots)
+    attempted_slots = _filter_attempted_questions(slots) if is_choice else slots
+
+    offered_marks = sum(int(s.get("marks", 0)) for s in slots)
+    attempted_marks = sum(int(s.get("marks", 0)) for s in attempted_slots)
+    base_marks = attempted_marks if is_choice and attempted_marks > 0 else (offered_marks or 1)
+
+    unit_marks: dict[int, int] = {}
+    unit_attempted_marks: dict[int, int] = {}
     bt_marks: dict[str, int] = {}
     bt_counts: dict[str, int] = {}
     kd_marks: dict[str, int] = {kd: 0 for kd in KNOWLEDGE_DIMENSIONS}
@@ -762,8 +827,13 @@ def calculate_blueprint_stats(slots: list[dict[str, Any]]) -> dict[str, Any]:
 
     for s in slots:
         m = int(s.get("marks", 0))
-        part = s.get("part", "General")
-        part_marks[part] = part_marks.get(part, 0) + m
+        u = int(s.get("unit", 1))
+        unit_marks[u] = unit_marks.get(u, 0) + m
+
+    for s in attempted_slots:
+        m = int(s.get("marks", 0))
+        u = int(s.get("unit", 1))
+        unit_attempted_marks[u] = unit_attempted_marks.get(u, 0) + m
 
         lvl = s.get("level", "L1").upper()
         bt_marks[lvl] = bt_marks.get(lvl, 0) + m
@@ -778,21 +848,26 @@ def calculate_blueprint_stats(slots: list[dict[str, Any]]) -> dict[str, Any]:
         co_counts[co] = co_counts.get(co, 0) + 1
 
     bt_percent = {
-        lvl: round((marks / total_marks * 100), 1) if total_marks > 0 else 0.0
+        lvl: round((marks / base_marks * 100), 1)
         for lvl, marks in bt_marks.items()
     }
 
     kd_percent = {
-        kd: round((marks / total_marks * 100), 1) if total_marks > 0 else 0.0
+        kd: round((marks / base_marks * 100), 1)
         for kd, marks in kd_marks.items()
     }
 
-    matrix_2d = compute_2d_taxonomy_matrix(slots)
+    matrix_2d = compute_2d_taxonomy_matrix(attempted_slots)
 
     return {
-        "total_marks": total_marks,
+        "total_marks": attempted_marks if is_choice else offered_marks,
+        "attempted_marks": attempted_marks,
+        "offered_marks": offered_marks,
+        "is_choice": is_choice,
         "total_questions": len(slots),
-        "part_marks": part_marks,
+        "unit_marks": unit_marks,
+        "unit_attempted_marks": unit_attempted_marks,
+        "part_marks": {f"Unit {u}": m for u, m in unit_marks.items()},
         "bt_marks": bt_marks,
         "bt_counts": bt_counts,
         "bt_percent": bt_percent,
@@ -802,5 +877,5 @@ def calculate_blueprint_stats(slots: list[dict[str, Any]]) -> dict[str, Any]:
         "matrix_2d": matrix_2d,
         "co_marks": co_marks,
         "co_counts": co_counts,
-        "is_standard_50": total_marks == 50,
+        "is_standard_50": (attempted_marks if is_choice else offered_marks) == 50,
     }

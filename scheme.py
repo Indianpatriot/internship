@@ -35,7 +35,15 @@ UNIT_HEADER_RE = re.compile(
     re.I,
 )
 HOURS_RE = re.compile(r"\(?\b(\d+)\s*(?:hours|hrs|hr|teaching hours|contact hours)\b\)?", re.I)
-CO_LINE_RE = re.compile(r"^(?:co|lo|clo)\s*([0-9]+)\s*[:.\-–—]?\s*(.*)$", re.I)
+CO_LINE_RE = re.compile(
+    r"^(?:(?:course\s*outcome|learning\s*outcome|course\s*learning\s*outcome|outcome|co|lo|clo)\s*[-_.]?\s*([0-9]+))(?:\s*[:.\-–—)]\s*|\s+)(.*)$",
+    re.I,
+)
+CO_NUMBERED_RE = re.compile(
+    r"^(?:\[?\(?([0-9]+)\)?\]?\.?)\s*[:.\-–—)]\s*(.*)$",
+    re.I,
+)
+CO_BULLET_RE = re.compile(r"^[•*–—\-]\s*(.*)$")
 TEXTBOOK_HEADER_RE = re.compile(
     r"^(?:text\s*books?|reference\s*books?|references?|prescribed\s*books?|suggested\s*readings?)\b",
     re.I,
@@ -156,14 +164,29 @@ def parse_scheme_text(
 
         elif current_section == "CO" or CO_LINE_RE.match(line):
             co_match = CO_LINE_RE.match(line)
+            num_match = CO_NUMBERED_RE.match(line) if current_section == "CO" else None
+            bullet_match = CO_BULLET_RE.match(line) if current_section == "CO" else None
             if co_match:
                 code_num = co_match.group(1)
                 co_text = co_match.group(2).strip()
                 current_co_code = f"CO{code_num}"
                 outcomes[current_co_code] = co_text
+            elif num_match:
+                code_num = num_match.group(1)
+                co_text = num_match.group(2).strip()
+                current_co_code = f"CO{code_num}"
+                outcomes[current_co_code] = co_text
+            elif bullet_match:
+                code_num = str(len(outcomes) + 1)
+                current_co_code = f"CO{code_num}"
+                outcomes[current_co_code] = bullet_match.group(1).strip()
             elif current_co_code:
                 # Continuation line for the current CO
-                outcomes[current_co_code] += " " + line
+                outcomes[current_co_code] += " " + line.strip()
+            elif current_section == "CO" and line.strip():
+                code_num = str(len(outcomes) + 1)
+                current_co_code = f"CO{code_num}"
+                outcomes[current_co_code] = line.strip()
 
         elif current_section == "TEXTBOOKS":
             # Strip list numbers or bullets: '1.', '[1]', '-', '*'

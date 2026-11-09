@@ -23,4 +23,15 @@ MAX_COS = 6
 # Page filtering
 FILTER_USE_LLM = os.getenv("FILTER_USE_LLM", "false").lower() in ("1", "true", "yes")
 
+# Performance & Parallel Generation
+GENERATION_WORKERS = int(os.getenv("GENERATION_WORKERS", "3"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "4"))
+ENABLE_GENERATION_CACHE = os.getenv("ENABLE_GENERATION_CACHE", "true").lower() in ("1", "true", "yes")
+
+# Embeddings & Retrieval Performance
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+
 

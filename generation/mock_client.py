@@ -51,26 +51,82 @@ def _format_question_with_verb(verb: str, concept: str) -> str:
     v = verb.lower().strip()
     V = v.capitalize()
 
-    if v in {"define", "state", "recall", "name"}:
-        return f"{V} the fundamental concept and properties of {concept}?"
-    elif v in {"enumerate", "list", "identify", "label"}:
-        return f"{V} the primary characteristics and elements of {concept}?"
-    elif v in {"explain", "describe", "discuss", "clarify", "interpret"}:
-        return f"{V} how {concept} operates within the system?"
-    elif v in {"classify", "categorize", "distinguish", "differentiate"}:
-        return f"{V} the various categories and approaches associated with {concept}?"
-    elif v in {"apply", "demonstrate", "illustrate", "implement", "execute", "respond", "provide", "use"}:
-        return f"{V} practical solutions and implementations involving {concept}?"
-    elif v in {"solve", "calculate", "compute", "determine"}:
-        return f"{V} analytical problems involving {concept} using standard methodologies?"
-    elif v in {"analyze", "deconstruct", "examine", "investigate", "integrate"}:
-        return f"{V} the structural behavior, parameters, and trade-offs of {concept}?"
+    if v == "define":
+        return f"{V} the formal definition and technical scope of {concept}?"
+    elif v == "state":
+        return f"{V} the primary principle, rule, or theorem governing {concept}?"
+    elif v == "recall":
+        return f"{V} the foundational terms and memory models of {concept}?"
+    elif v == "name":
+        return f"{V} the core components and key attributes of {concept}?"
+    elif v == "list":
+        return f"{V} the main properties and prerequisites associated with {concept}?"
+    elif v == "enumerate":
+        return f"{V} the sequential phases and distinct elements of {concept}?"
+    elif v == "identify":
+        return f"{V} the critical factors and operational roles within {concept}?"
+    elif v == "label":
+        return f"{V} the functional parts and structural diagrams of {concept}?"
+    elif v == "explain":
+        return f"{V} how {concept} functions and behaves within the system?"
+    elif v == "describe":
+        return f"{V} the step-by-step process and detailed workflow of {concept}?"
+    elif v == "discuss":
+        return f"{V} the practical implications and trade-offs of using {concept}?"
+    elif v == "clarify":
+        return f"{V} the common misconceptions and distinct subtleties regarding {concept}?"
+    elif v == "interpret":
+        return f"{V} the meaning, trends, and significance revealed by {concept}?"
+    elif v == "classify":
+        return f"{V} the distinct taxonomy groups and types related to {concept}?"
+    elif v == "categorize":
+        return f"{V} the diverse approaches, tiers, and styles of {concept}?"
+    elif v == "distinguish":
+        return f"{V} the boundaries and contrasting properties separating {concept}?"
+    elif v == "differentiate":
+        return f"{V} between the specialized variants and regular forms of {concept}?"
+    elif v in {"apply", "use"}:
+        return f"{V} practical solutions and real-world techniques to solve {concept}?"
+    elif v in {"demonstrate", "illustrate"}:
+        return f"{V} an end-to-end working example showing {concept} in action?"
+    elif v in {"implement", "execute"}:
+        return f"{V} a complete algorithmic procedure realizing {concept}?"
+    elif v in {"respond", "provide"}:
+        return f"{V} appropriate design responses and valid strategies for {concept}?"
+    elif v in {"solve", "calculate"}:
+        return f"{V} quantitative equations and analytical problems involving {concept}?"
+    elif v in {"compute", "determine"}:
+        return f"{V} numerical bounds and computational metrics for {concept}?"
+    elif v == "analyze":
+        return f"{V} the architectural trade-offs and structural behavior of {concept}?"
+    elif v == "deconstruct":
+        return f"{V} the internal logic, module boundaries, and mechanisms of {concept}?"
+    elif v == "examine":
+        return f"{V} the underlying relationships and execution patterns inside {concept}?"
+    elif v in {"investigate", "integrate"}:
+        return f"{V} the composite behavior and integration points of {concept}?"
     elif v in {"compare", "contrast"}:
-        return f"{V} the operational advantages and distinctions within {concept}?"
-    elif v in {"evaluate", "assess", "justify", "critique", "appraise", "check", "reflect", "judge"}:
-        return f"{V} the performance, efficiency, and practical limitations of {concept}?"
-    elif v in {"design", "formulate", "construct", "propose", "develop", "generate", "assemble", "create"}:
-        return f"{V} an effective framework utilizing {concept}?"
+        return f"{V} the operational advantages, complexity, and differences in {concept}?"
+    elif v == "evaluate":
+        return f"{V} the overall performance, scalability, and efficiency of {concept}?"
+    elif v == "assess":
+        return f"{V} the feasibility, risk profile, and system impact of {concept}?"
+    elif v == "justify":
+        return f"{V} the engineering choices and theoretical rationale supporting {concept}?"
+    elif v == "critique":
+        return f"{V} the architectural flaws, edge cases, and limitations of {concept}?"
+    elif v == "appraise":
+        return f"{V} the industrial utility, reliability, and business value of {concept}?"
+    elif v in {"check", "reflect", "judge"}:
+        return f"{V} the correctness, quality benchmarks, and ethical facets of {concept}?"
+    elif v in {"design", "propose"}:
+        return f"{V} an innovative architecture and blueprint utilizing {concept}?"
+    elif v in {"formulate", "develop"}:
+        return f"{V} a rigorous methodology and structured model based on {concept}?"
+    elif v in {"construct", "assemble"}:
+        return f"{V} a robust modular pipeline integrating {concept} seamlessly?"
+    elif v in {"generate", "create"}:
+        return f"{V} novel test scenarios and synthetic artifacts reflecting {concept}?"
     else:
         return f"{V} the underlying mechanisms and significance of {concept}?"
 
@@ -81,7 +137,7 @@ class MockClient:
     def is_up(self):
         return True
 
-    def generate(self, prompt, temperature=None, num_predict=120):
+    def generate(self, prompt, temperature=None, num_predict=120, format=None, **kwargs):
         # Answer generation prompt
         if "Model Answer:" in prompt or "authoritative model answer" in prompt:
             return self._generate_answer(prompt)

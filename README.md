@@ -35,6 +35,23 @@ ollama serve                 # run in a separate terminal
 ollama pull llama3.1:8b      # or set OLLAMA_MODEL in config.py
 ```
 
+### Parallel LLM Generation & Performance Configuration
+To maximize generation speed, question slots are generated concurrently using a `ThreadPoolExecutor`. To enable Ollama to process concurrent requests in parallel on your GPU/CPU:
+
+```bash
+# Set Ollama server concurrency before starting (e.g. 4 parallel slots)
+export OLLAMA_NUM_PARALLEL=4
+ollama serve
+```
+
+Key performance configurations available via environment variables or `config.py`:
+- `GENERATION_WORKERS`: Concurrent worker threads for slot generation (default `3`).
+- `OLLAMA_KEEP_ALIVE`: Keep-alive duration to prevent model unloading from memory (default `"30m"`).
+- `OLLAMA_NUM_CTX`: Context window allocated per generation request (default `2048`).
+- `ENABLE_GENERATION_CACHE`: In-memory & disk caching under `.cache/generation/` keyed by prompt hash (default `true`).
+- `EMBEDDING_BATCH_SIZE`: Batch size for SentenceTransformer embedding operations (default `32`).
+
+
 ## CLI Usage
 ```bash
 # Ingest PDF into chunks

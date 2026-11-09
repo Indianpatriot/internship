@@ -1,11 +1,27 @@
-"""Step 3c / Issue 4 - question and answer generation with validation, retry, de-duplication, and multi-book assembly."""
+"""Step 3c / Issue 4 - question and answer generation with validation, retry, de-duplication, and multi-book assembly.
+
+Optimized with:
+- Parallel slot generation via ThreadPoolExecutor with strict order preservation
+- Fast LLM result caching (keyed by prompt, model, temperature, seed)
+- Bounded token caps (num_predict) tailored to questions vs answers
+- Targeted Bloom's verb retries
+- Reused chunk embeddings for grounded answer cosine similarity
+"""
+import concurrent.futures
 import random
 import re
+import threading
 from typing import Any, Optional
 
 from blooms.revised_taxonomy import normalize_knowledge_dimension
 from blooms.verb_bank import first_word, normalize_level, sample_verbs, validate_question
-from config import ANSWER_MIN_SIMILARITY, MAX_CONTEXT_WORDS, MIN_CONTEXT_WORDS
+from config import (
+    ANSWER_MIN_SIMILARITY,
+    GENERATION_WORKERS,
+    MAX_CONTEXT_WORDS,
+    MIN_CONTEXT_WORDS,
+)
+from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_answer_prompt, build_prompt
 from retrieval.sources import select_chunks_for_unit
 
@@ -44,6 +60,7 @@ def generate_question(
     marks=None,
     k_verbs=4,
     knowledge_dimension=None,
+    force_regenerate=False,
 ):
     level = normalize_level(level)
     rng = rng or random.Random()
@@ -51,14 +68,41 @@ def generate_question(
     context = " ".join(chunk["text"].split()[:MAX_CONTEXT_WORDS])
     q, reason, attempts = "", "no output", 0
     ok = False
+    
+    num_predict = min(80, max(45, (marks or 5) * 8))
+    client_model = getattr(client, "model", "llama3.1:8b")
+
     for attempts in range(1, max_retries + 1):
         verbs = sample_verbs(level, k_verbs, rng)
         prompt = build_prompt(context, level, verbs, marks=marks, knowledge_dimension=kd)
-        raw = client.generate(prompt, temperature=min(0.3 + 0.2 * (attempts - 1), 0.9))
+        temp = min(0.3 + 0.2 * (attempts - 1), 0.9)
+        
+        cached = get_cached_response(prompt, client_model, temperature=temp, force_regenerate=force_regenerate)
+        if cached:
+            raw = cached
+        else:
+            raw = client.generate(prompt, temperature=temp, num_predict=num_predict)
+            
         q = clean_output(raw)
         ok, reason = validate_question(q, level)
         if ok:
+            if not cached:
+                store_cached_response(prompt, client_model, raw, temperature=temp)
             break
+        elif attempts < max_retries:
+            verbs = sample_verbs(level, k_verbs, rng)
+            targeted_prompt = (
+                f"{prompt}\n\nNote: The question must strictly start with one of: {', '.join(verbs)}. "
+                f"Ensure the first word is one of these verbs and ends with '?'."
+            )
+            raw = client.generate(targeted_prompt, temperature=temp + 0.1, num_predict=num_predict)
+            q = clean_output(raw)
+            ok, reason = validate_question(q, level)
+            attempts += 1
+            if ok:
+                store_cached_response(prompt, client_model, raw, temperature=temp)
+                break
+
     return {
         "question": q,
         "level": level,
@@ -86,6 +130,7 @@ def generate_answer(
     rng: Optional[random.Random] = None,
     max_retries: int = 3,
     check_similarity: Optional[bool] = None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
     """Generate model answer grounded in chunk context.
 
@@ -104,10 +149,18 @@ def generate_answer(
     reason = "no output"
     ok = False
 
+    num_predict = min(400, max(60, marks * 30))
+    client_model = getattr(client, "model", "llama3.1:8b")
+
     for attempt in range(1, max_retries + 1):
         temp = min(0.3 + 0.2 * (attempt - 1), 0.9)
         prompt = build_answer_prompt(question, context, marks=marks)
-        raw = client.generate(prompt, temperature=temp)
+
+        cached = get_cached_response(prompt, client_model, temperature=temp, force_regenerate=force_regenerate)
+        if cached:
+            raw = cached
+        else:
+            raw = client.generate(prompt, temperature=temp, num_predict=num_predict)
 
         # Clean output fences
         text = re.sub(r"^```\w*|```$", "", (raw or "").strip(), flags=re.M).strip()
@@ -149,7 +202,12 @@ def generate_answer(
             from retrieval.co_mapper import _m
             embedder = _m()
             ans_vec = embedder.encode([last_answer], normalize_embeddings=True)
-            chunk_vec = embedder.encode([chunk.get("text", "")], normalize_embeddings=True)
+            chunk_vec = chunk.get("embedding")
+            if chunk_vec is None:
+                chunk_vec = embedder.encode([chunk.get("text", "")], normalize_embeddings=True)[0]
+                chunk["embedding"] = chunk_vec
+            if len(chunk_vec.shape) == 1:
+                chunk_vec = chunk_vec.reshape(1, -1)
             sim = float((ans_vec @ chunk_vec.T)[0, 0])
             if sim < ANSWER_MIN_SIMILARITY:
                 reason = f"similarity {sim:.3f} below threshold {ANSWER_MIN_SIMILARITY}"
@@ -157,6 +215,8 @@ def generate_answer(
 
         ok = True
         reason = "ok"
+        if not cached:
+            store_cached_response(prompt, client_model, raw, temperature=temp)
         break
 
     return {
@@ -193,8 +253,19 @@ def generate_paper(chunks, level_counts, client, seed=None, marks=None, on_progr
     return {"questions": questions, "rejected": rejected}
 
 
-def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, unit_sources=None):
+def generate_paper_by_slots(
+    chunks: list[dict[str, Any]],
+    slots: list[dict[str, Any]],
+    client: Any,
+    seed: Optional[int] = None,
+    on_progress: Optional[Any] = None,
+    unit_sources: Optional[dict[Any, Any]] = None,
+    workers: Optional[int] = None,
+    force_regenerate: bool = False,
+) -> dict[str, Any]:
     """Generate questions and model answers matching blueprint slots.
+
+    Executes concurrently using a ThreadPoolExecutor while preserving exact original slot order.
 
     Args:
         chunks: List of text chunk dicts.
@@ -203,27 +274,35 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
         seed: Random seed for repeatability.
         on_progress: Optional callback on question accepted.
         unit_sources: Optional mapping {unit: {book_id: [chapters] or None}}.
+        workers: Optional max workers count (defaults to config.GENERATION_WORKERS).
+        force_regenerate: If True, bypasses generation cache.
     """
-    rng = random.Random(seed)
-    usable = [c for c in chunks if c.get("word_count", len(c["text"].split())) >= MIN_CONTEXT_WORDS]
-    questions, rejected, unfilled, seen = [], [], [], []
+    usable = [c for c in chunks if c.get("word_count", len(c.get("text", "").split())) >= MIN_CONTEXT_WORDS]
+    if not usable or not slots:
+        return {"questions": [], "rejected": [], "unfilled": list(slots)}
 
-    # Track chunks used per alternative group to avoid chunk reuse within choice alternatives
+    num_workers = workers if workers is not None else GENERATION_WORKERS
+    num_workers = max(1, min(num_workers, len(slots)))
+
+    seen_lock = threading.Lock()
+    group_lock = threading.Lock()
+    progress_lock = threading.Lock()
+
     used_chunks_per_group: dict[str, set[str]] = {}
+    seen_questions: list[str] = []
 
-    for slot in slots:
+    def _process_single_slot(slot_idx: int, slot: dict[str, Any]) -> dict[str, Any]:
+        slot_rng = random.Random(seed + slot_idx * 1000 if seed is not None else None)
         slot_unit = slot.get("unit")
         alt_group = slot.get("alternative_group")
 
-        # 1. Filter chunks per slot's unit BEFORE ranking by co_scores
         candidate_chunks = select_chunks_for_unit(usable, unit_sources, slot_unit)
         if not candidate_chunks:
-            unfilled.append(slot)
-            continue
+            return {"status": "unfilled", "slot": slot, "rejected": [], "slot_idx": slot_idx}
 
-        # 2. Avoid reusing chunk within the same alternative group
         if alt_group:
-            used_ids = used_chunks_per_group.get(alt_group, set())
+            with group_lock:
+                used_ids = set(used_chunks_per_group.get(alt_group, set()))
             filtered = [c for c in candidate_chunks if c.get("chunk_id") not in used_ids]
             pool_source = filtered if filtered else candidate_chunks
         else:
@@ -239,41 +318,53 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
         else:
             pool = pool_source[:10]
 
-        rng.shuffle(pool)
+        slot_rng.shuffle(pool)
         slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
+        slot_rejected = []
 
         for chunk in pool * 2:
-            rec = generate_question(
-                chunk,
-                slot["level"],
-                client,
-                rng,
-                marks=slot.get("marks"),
-                knowledge_dimension=slot_kd,
-            )
-            if not rec["valid"] or is_duplicate(rec["question"], seen):
-                rejected.append(rec)
+            try:
+                rec = generate_question(
+                    chunk,
+                    slot["level"],
+                    client,
+                    slot_rng,
+                    marks=slot.get("marks"),
+                    knowledge_dimension=slot_kd,
+                    force_regenerate=force_regenerate,
+                )
+            except Exception as e:
+                rec = {"valid": False, "reason": f"generation exception: {e}"}
+
+            with seen_lock:
+                is_dup = is_duplicate(rec.get("question", ""), seen_questions) if rec.get("valid") else False
+
+            if not rec.get("valid") or is_dup:
+                slot_rejected.append(rec)
                 continue
 
-            # Generate model answer - question is only accepted if answer is valid
-            ans_rec = generate_answer(
-                rec["question"],
-                chunk,
-                slot.get("marks"),
-                client,
-                rng=rng,
-            )
-            if not ans_rec["valid"]:
+            try:
+                ans_rec = generate_answer(
+                    rec["question"],
+                    chunk,
+                    slot.get("marks"),
+                    client,
+                    rng=slot_rng,
+                    force_regenerate=force_regenerate,
+                )
+            except Exception as e:
+                ans_rec = {"valid": False, "reason": f"answer exception: {e}"}
+
+            if not ans_rec.get("valid"):
                 rec["valid"] = False
-                rec["reason"] = f"answer generation failed: {ans_rec['reason']}"
-                rejected.append(rec)
+                rec["reason"] = f"answer generation failed: {ans_rec.get('reason')}"
+                slot_rejected.append(rec)
                 continue
 
-            # Populate provenance and slot linkage fields
             rec["answer"] = ans_rec["answer"]
             rec["answer_alternatives"] = ans_rec["answer_alternatives"]
             rec["co"] = slot.get("co", "CO1")
-            rec["id"] = slot.get("id") or slot.get("label") or f"Q{len(questions) + 1:03d}"
+            rec["id"] = slot.get("id") or slot.get("label") or f"Q{slot_idx + 1:03d}"
             rec["unit"] = slot.get("unit")
             rec["question_no"] = slot.get("question_no")
             rec["sub_index"] = slot.get("sub_index")
@@ -283,21 +374,74 @@ def generate_paper_by_slots(chunks, slots, client, seed=None, on_progress=None, 
             rec["chapter"] = chunk.get("chapter")
             rec["page"] = chunk.get("page_start")
 
-            if "part" in slot:
-                rec["part"] = slot["part"]
+            if "unit" in slot:
+                rec["unit"] = slot["unit"]
             rec["knowledge_dimension"] = slot_kd
             rec["kd"] = slot_kd
 
             if alt_group and chunk.get("chunk_id"):
-                used_chunks_per_group.setdefault(alt_group, set()).add(chunk["chunk_id"])
+                with group_lock:
+                    used_chunks_per_group.setdefault(alt_group, set()).add(chunk["chunk_id"])
 
-            seen.append(rec["question"])
-            questions.append(rec)
+            with seen_lock:
+                seen_questions.append(rec["question"])
+
+            return {"status": "ok", "question": rec, "rejected": slot_rejected, "slot_idx": slot_idx}
+
+        return {"status": "unfilled", "slot": slot, "rejected": slot_rejected, "slot_idx": slot_idx}
+
+    results_by_index: list[Optional[dict[str, Any]]] = [None] * len(slots)
+
+    if num_workers <= 1 or len(slots) <= 1:
+        for idx, slot in enumerate(slots):
+            res = _process_single_slot(idx, slot)
+            results_by_index[idx] = res
             if on_progress:
-                on_progress(rec)
-            break
+                try:
+                    on_progress(res.get("question") or slot)
+                except Exception:
+                    pass
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_idx = {
+                executor.submit(_process_single_slot, idx, slot): idx
+                for idx, slot in enumerate(slots)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    res = future.result()
+                    results_by_index[idx] = res
+                    if on_progress:
+                        try:
+                            on_progress(res.get("question") or slots[idx])
+                        except Exception:
+                            pass
+                except Exception as ex:
+                    results_by_index[idx] = {
+                        "status": "unfilled",
+                        "slot": slots[idx],
+                        "rejected": [{"valid": False, "reason": str(ex)}],
+                        "slot_idx": idx,
+                    }
+                    if on_progress:
+                        try:
+                            on_progress(slots[idx])
+                        except Exception:
+                            pass
+
+    questions = []
+    rejected = []
+    unfilled = []
+    for item in results_by_index:
+        if not item:
+            continue
+        if item.get("rejected"):
+            rejected.extend(item["rejected"])
+        if item["status"] == "ok":
+            questions.append(item["question"])
         else:
-            unfilled.append(slot)
+            unfilled.append(item["slot"])
 
     return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
 
@@ -310,13 +454,10 @@ def generate_full_paper(
     client: Any,
     seed: Optional[int] = None,
     on_progress: Optional[Any] = None,
+    workers: Optional[int] = None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
-    """Generate a complete exam paper with questions and model answers from blueprint and outcomes.
-
-    1. Scores chunks against outcomes using semantic embeddings (score_chunks_against_outcomes).
-    2. Generates question and answer for every slot using unit-filtered chunks and alternative anti-collision.
-    3. Returns {"questions": [QuestionRecord...], "rejected": [...], "unfilled": [...], "blueprint_report": {...}}.
-    """
+    """Generate a complete exam paper with questions and model answers from blueprint and outcomes."""
     from retrieval.co_mapper import score_chunks_against_outcomes
 
     # 1. Score chunks against outcomes
@@ -338,6 +479,8 @@ def generate_full_paper(
         seed=seed,
         on_progress=on_progress,
         unit_sources=unit_sources,
+        workers=workers,
+        force_regenerate=force_regenerate,
     )
 
     return {

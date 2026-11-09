@@ -9,10 +9,10 @@ from totals import summarize
 
 def test_create_docx_exam_paper():
     questions = [
-        {"id": "1", "part": "Part A", "question": "Define machine learning algorithms?", "level": "L1", "co": "CO1", "marks": 2},
-        {"id": "2", "part": "Part A", "question": "Explain gradient descent optimization?", "level": "L2", "co": "CO2", "marks": 2},
-        {"id": "6(a)", "part": "Part B", "question": "Demonstrate the backpropagation algorithm with an example?", "level": "L3", "co": "CO1", "marks": 5},
-        {"id": "6(b)", "part": "Part B", "question": "Analyze overfitting mitigation techniques?", "level": "L4", "co": "CO2", "marks": 5},
+        {"id": "1", "unit": 1, "question": "Define machine learning algorithms?", "level": "L1", "co": "CO1", "marks": 2},
+        {"id": "2", "unit": 1, "question": "Explain gradient descent optimization?", "level": "L2", "co": "CO2", "marks": 2},
+        {"id": "6(a)", "unit": 2, "question": "Demonstrate the backpropagation algorithm with an example?", "level": "L3", "co": "CO1", "marks": 5},
+        {"id": "6(b)", "unit": 2, "question": "Analyze overfitting mitigation techniques?", "level": "L4", "co": "CO2", "marks": 5},
     ]
     outcomes = {"CO1": "Understand ML concepts", "CO2": "Analyze optimization"}
     docx_bytes = create_docx_exam_paper(questions, course_name="Machine Learning", outcomes=outcomes)
@@ -24,10 +24,10 @@ def test_create_docx_exam_paper():
 
 def test_create_pdf_exam_paper():
     questions = [
-        {"id": "1", "part": "Part A", "question": "Define machine learning algorithms?", "level": "L1", "co": "CO1", "marks": 2},
-        {"id": "2", "part": "Part A", "question": "Explain gradient descent optimization?", "level": "L2", "co": "CO2", "marks": 2},
-        {"id": "6(a)", "part": "Part B", "question": "Demonstrate the backpropagation algorithm with an example?", "level": "L3", "co": "CO1", "marks": 5},
-        {"id": "6(b)", "part": "Part B", "question": "Analyze overfitting mitigation techniques?", "level": "L4", "co": "CO2", "marks": 5},
+        {"id": "1", "unit": 1, "question": "Define machine learning algorithms?", "level": "L1", "co": "CO1", "marks": 2},
+        {"id": "2", "unit": 1, "question": "Explain gradient descent optimization?", "level": "L2", "co": "CO2", "marks": 2},
+        {"id": "6(a)", "unit": 2, "question": "Demonstrate the backpropagation algorithm with an example?", "level": "L3", "co": "CO1", "marks": 5},
+        {"id": "6(b)", "unit": 2, "question": "Analyze overfitting mitigation techniques?", "level": "L4", "co": "CO2", "marks": 5},
     ]
     outcomes = {"CO1": "Understand ML concepts", "CO2": "Analyze optimization"}
     pdf_bytes = create_pdf_exam_paper(questions, course_name="Machine Learning", outcomes=outcomes)
@@ -38,13 +38,14 @@ def test_create_pdf_exam_paper():
 
 
 def test_50_mark_blueprint_structure():
-    slots = get_50_mark_blueprint(["CO1", "CO2", "CO3"])
+    slots = get_50_mark_blueprint(["CO1", "CO2", "CO3", "CO4"])
     stats = calculate_blueprint_stats(slots)
     assert stats["total_marks"] == 50
     assert stats["is_standard_50"] is True
-    assert stats["part_marks"]["Part A"] == 10
-    assert stats["part_marks"]["Part B"] == 40
-    assert len(slots) == 13  # 5 in Part A + 8 in Part B (4 questions x 2 subparts)
+    assert stats["unit_marks"][1] == 10
+    assert stats["unit_marks"][2] == 10
+    assert stats["unit_marks"][5] == 10
+    assert len(slots) == 10
 
 
 def test_export_answers_and_or_format():
@@ -118,9 +119,9 @@ def test_export_answers_and_or_format():
 def test_export_cumulative_totals():
     """Substep 2.2: Add optional totals table at the end (enabled vs disabled)."""
     questions = [
-        {"id": "1", "part": "Part A", "question": "Define machine learning?", "level": "L1", "co": "CO1", "marks": 2},
-        {"id": "2", "part": "Part A", "question": "Explain gradient descent?", "level": "L2", "co": "CO2", "marks": 2},
-        {"id": "3", "part": "Part B", "question": "Implement backpropagation?", "level": "L3", "co": "CO1", "marks": 5},
+        {"id": "1", "unit": 1, "question": "Define machine learning?", "level": "L1", "co": "CO1", "marks": 2},
+        {"id": "2", "unit": 1, "question": "Explain gradient descent?", "level": "L2", "co": "CO2", "marks": 2},
+        {"id": "3", "unit": 2, "question": "Implement backpropagation?", "level": "L3", "co": "CO1", "marks": 5},
     ]
     outcomes = {"CO1": "Foundations", "CO2": "Optimization"}
 
@@ -191,3 +192,54 @@ def test_export_100_mark_preset_choice_paper():
     )
     assert len(pdf_bytes) > 5000
     assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_no_section_or_part_in_100_mark_export():
+    """Verify 100-mark generated paper contains UNIT headers and NO Part/Section text."""
+    from paper_preset import make_preset
+
+    preset = make_preset(
+        "100 marks",
+        units=5,
+        marks_per_unit=20,
+        options=2,
+        sub_marks={1: [10, 10], 2: [10, 10], 3: [10, 10], 4: [10, 10], 5: [10, 10]},
+    )
+    bp = build_blueprint(preset=preset, seed=42)
+    slots = bp["slots"]
+    questions = []
+    for s in slots:
+        q_copy = dict(s)
+        q_copy["question"] = f"Explain the fundamental mechanism for unit {s['unit']}?"
+        questions.append(q_copy)
+
+    docx_bytes = create_docx_exam_paper(questions, course_name="Computer Science")
+    doc = docx.Document(io.BytesIO(docx_bytes))
+    docx_text = "\n".join(
+        [p.text for p in doc.paragraphs]
+        + [c.text for t in doc.tables for row in t.rows for c in row.cells]
+    )
+
+    # Must NOT contain Section A/B or Part A/B
+    assert "part a" not in docx_text.lower()
+    assert "part b" not in docx_text.lower()
+    assert "section a" not in docx_text.lower()
+    assert "section b" not in docx_text.lower()
+    assert "UNIT 1" in docx_text
+    assert "UNIT 2" in docx_text
+    assert "UNIT 5" in docx_text
+    assert "— OR —" in docx_text
+
+    pdf_bytes = create_pdf_exam_paper(questions, course_name="Computer Science")
+    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pdf_text = "\n".join([page.get_text() for page in pdf_doc])
+
+    assert "part a" not in pdf_text.lower()
+    assert "part b" not in pdf_text.lower()
+    assert "section a" not in pdf_text.lower()
+    assert "section b" not in pdf_text.lower()
+    assert "UNIT 1" in pdf_text
+    assert "UNIT 2" in pdf_text
+    assert "UNIT 5" in pdf_text
+    assert "— OR —" in pdf_text
+

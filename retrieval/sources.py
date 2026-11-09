@@ -45,7 +45,19 @@ def select_chunks_for_unit(
                 c_chap = c.get("chapter")
                 allowed_str = [str(ch).strip().lower() for ch in allowed_chapters if ch is not None]
                 c_chap_str = str(c_chap).strip().lower() if c_chap is not None else ""
-                if c_chap in allowed_chapters or c_chap_str in allowed_str:
+                c_title_str = str(c.get("book_title", "")).strip().lower()
+                c_book_str = str(c_book).strip().lower() if c_book is not None else ""
+                matched = (
+                    c_chap in allowed_chapters
+                    or c_chap_str in allowed_str
+                    or any(
+                        achap == f"{c_book_str} - {c_chap_str}"
+                        or achap == f"{c_title_str} - {c_chap_str}"
+                        or achap.endswith(f"- {c_chap_str}")
+                        for achap in allowed_str
+                    )
+                )
+                if matched:
                     filtered.append(c)
 
     return filtered

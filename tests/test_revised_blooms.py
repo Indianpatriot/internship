@@ -106,7 +106,7 @@ def test_docx_and_pdf_export_with_knowledge_dimension():
     questions = [
         {
             "id": "1",
-            "part": "Part A",
+            "unit": 1,
             "question": "List the primary properties of binary search trees?",
             "level": "L1",
             "knowledge_dimension": "Factual",
@@ -117,7 +117,7 @@ def test_docx_and_pdf_export_with_knowledge_dimension():
         },
         {
             "id": "6(a)",
-            "part": "Part B",
+            "unit": 2,
             "question": "Design an optimal indexing strategy for query execution?",
             "level": "L6",
             "knowledge_dimension": "Procedural",
@@ -152,7 +152,7 @@ def test_generate_paper_preserves_knowledge_dimension():
     slots = [
         {
             "id": "1",
-            "part": "Part A",
+            "unit": 1,
             "co": "CO1",
             "level": "L1",
             "knowledge_dimension": "Factual",

@@ -14,11 +14,20 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from config import MIN_CONTEXT_WORDS
+from config import MAX_CHUNK_WORDS, MIN_CHUNK_WORDS, MIN_CONTEXT_WORDS, OVERLAP_WORDS
 from ingestion.pipeline import ingest
 from retrieval.sources import select_chunks_for_unit
 
 CACHE_DIR = Path(".cache/ingestion")
+FILTER_VERSION = "pf_v3"
+HEX_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8,64}[_-]+", re.I)
+
+
+def _clean_stem(name: str) -> str:
+    """Strip leading hex hash prefix and file extensions, returning human-readable stem."""
+    stem = Path(name).stem if ("." in name or "/" in name or "\\" in name) else name
+    cleaned = HEX_HASH_PREFIX_RE.sub("", stem).strip("_- ")
+    return cleaned or stem
 
 
 def _compute_file_hash(path: str) -> str:
@@ -31,8 +40,9 @@ def _compute_file_hash(path: str) -> str:
 
 
 def _sanitize_book_id(name: str) -> str:
-    """Normalize filename stem into a clean slug."""
-    stem = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    """Normalize filename stem into a clean slug, ignoring any leading hex hash prefix."""
+    clean = _clean_stem(name)
+    stem = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
     return stem or "book"
 
 
@@ -73,11 +83,14 @@ def add_book(
     """
     pdf_path_obj = Path(pdf_path)
     file_hash = _compute_file_hash(str(pdf_path_obj))
-    bid = book_id or _sanitize_book_id(pdf_path_obj.stem)
-    btitle = title or pdf_path_obj.stem.replace("-", " ").replace("_", " ").title()
+    clean_stem_name = _clean_stem(pdf_path_obj.stem)
+    bid = book_id or _sanitize_book_id(clean_stem_name)
+    clean_disp = clean_stem_name.replace("-", " ").replace("_", " ").strip()
+    btitle = title or (clean_disp.title() if clean_disp.islower() else clean_disp)
 
     cdir = Path(cache_dir) if cache_dir else CACHE_DIR
-    cache_file = cdir / f"{bid}_{file_hash}.json"
+    cfg_slug = f"w{MAX_CHUNK_WORDS}_o{OVERLAP_WORDS}_m{MIN_CHUNK_WORDS}"
+    cache_file = cdir / f"{bid}_{file_hash}_{FILTER_VERSION}_{cfg_slug}.json"
 
     if cache_file.exists():
         try:
@@ -87,6 +100,8 @@ def add_book(
             for c in cached_chunks:
                 c["book_id"] = bid
                 c["book_title"] = btitle
+                c["textbook"] = btitle
+                c["file_hash"] = file_hash
             return cached_chunks
         except Exception:
             # On corrupted cache, fall through to re-ingest
@@ -103,6 +118,8 @@ def add_book(
         c["chunk_id"] = f"{bid}_{i:04d}"
         c["book_id"] = bid
         c["book_title"] = btitle
+        c["textbook"] = btitle
+        c["file_hash"] = file_hash
 
     # Save to disk cache
     try:
@@ -116,12 +133,19 @@ def add_book(
     return chunks
 
 
-def load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None) -> dict[str, Any]:
+def load_library(
+    paths: list[str | Path],
+    cache_dir: Optional[Path | str] = None,
+    titles: Optional[list[str]] = None,
+    numbered: bool = False,
+) -> dict[str, Any]:
     """Load multiple textbooks, disambiguating IDs and compiling catalog metadata.
 
     Args:
         paths: List of PDF file paths.
         cache_dir: Optional custom cache directory.
+        titles: Optional list of human-readable book titles (e.g. ['1 ABC', '2 DEF']).
+        numbered: If True, force numbering titles as '1 <book>', '2 <book>'.
 
     Returns:
         {"books": {book_id: {...}}, "chunks": [all chunks]}
@@ -130,9 +154,10 @@ def load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None
     all_chunks: list[dict[str, Any]] = []
     seen_ids: dict[str, int] = {}
 
-    for p in paths:
+    for idx, p in enumerate(paths):
         path_obj = Path(p)
-        base_id = _sanitize_book_id(path_obj.stem)
+        clean_stem_name = _clean_stem(path_obj.stem)
+        base_id = _sanitize_book_id(clean_stem_name)
 
         # Disambiguate duplicate stems with numeric suffix
         if base_id not in seen_ids:
@@ -142,8 +167,22 @@ def load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None
             seen_ids[base_id] += 1
             assigned_id = f"{base_id}_{seen_ids[base_id]}"
 
-        title = path_obj.stem.replace("-", " ").replace("_", " ").title()
+        clean_disp = clean_stem_name.replace("-", " ").replace("_", " ").strip()
+        has_hex = bool(HEX_HASH_PREFIX_RE.match(path_obj.stem))
+
+        if titles and idx < len(titles):
+            title = titles[idx]
+            display_label = titles[idx]
+        elif has_hex or numbered:
+            title = f"{idx + 1} {clean_disp}"
+            display_label = f"{idx + 1} {clean_disp}"
+        else:
+            title = clean_disp.title() if clean_disp.islower() else clean_disp
+            display_label = f"{idx + 1} {clean_disp}"
+
         chunks = add_book(str(path_obj), book_id=assigned_id, title=title, cache_dir=cache_dir)
+        for c in chunks:
+            c["display_label"] = display_label
 
         # Collect ordered unique chapters
         ordered_chapters: list[str] = []
@@ -157,6 +196,8 @@ def load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None
 
         books[assigned_id] = {
             "title": title,
+            "display_label": display_label,
+            "order": idx + 1,
             "path": str(path_obj),
             "chapters": ordered_chapters,
             "n_chunks": len(chunks),
@@ -172,13 +213,17 @@ def load_library(paths: list[str | Path], cache_dir: Optional[Path | str] = None
 
 def list_chapters(library: dict[str, Any], book_id: str) -> list[dict[str, Any]]:
     """Return chapters of a book in page order with chunk counts and page bounds."""
+    from ingestion.heading_detect import is_non_content_title
     books = library.get("books", {})
     if book_id not in books:
         return []
 
     book_info = books[book_id]
-    ordered_chapters = list(book_info.get("chapters", []))
-    book_chunks = [c for c in library.get("chunks", []) if c.get("book_id") == book_id]
+    ordered_chapters = [ch for ch in list(book_info.get("chapters", [])) if not is_non_content_title(ch)]
+    book_chunks = [
+        c for c in library.get("chunks", [])
+        if c.get("book_id") == book_id and not is_non_content_title(c.get("chapter", ""))
+    ]
 
     chapter_stats: dict[str, dict[str, Any]] = {}
     for c in book_chunks:
@@ -245,6 +290,7 @@ def validate_unit_sources(
                             matched = (
                                 ch in book_chaps
                                 or str(ch).lower() in [str(c).lower() for c in book_chaps]
+                                or any(str(ch).lower().endswith(f"- {str(c).lower()}") or str(ch).lower() == f"{bid.lower()} - {str(c).lower()}" for c in book_chaps)
                             )
                             if not matched:
                                 problems.append(

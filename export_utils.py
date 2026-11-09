@@ -4,7 +4,7 @@ Implements Paper Assembly & Export (Step 2 of UI and Export requirements):
 - Substep 2.1: Show answers in DOCX/PDF, including the OR format (choice questions and answer alternatives).
 - Substep 2.2: Add the optional totals table at the end (Course Outcomes and Bloom's Taxonomy cumulative totals).
 - Table layout: (S.No, Question Text, Marks, BT (Cognitive), Knowledge Dimension (KD), CO, [Source])
-- Section grouping (Part A: 10 Marks, Part B: 40 Marks, Units with choice questions)
+- Unit grouping (Unit 1, Unit 2, ... with choice questions)
 - Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
 """
 import io
@@ -83,7 +83,7 @@ def create_docx_exam_paper(
         section.left_margin = Inches(0.75)
         section.right_margin = Inches(0.75)
 
-    # 1. Header Section
+    # 1. Header Information
     title_p = doc.add_paragraph()
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_run = title_p.add_run(f"{institution_name.upper()}\n")
@@ -189,28 +189,24 @@ def create_docx_exam_paper(
         shading = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
         hdr_cells[i]._tc.get_or_add_tcPr().append(shading)
 
-    has_parts = any("part" in q for q in questions)
-    current_part = None
+    current_unit = None
     prev_q: Optional[dict[str, Any]] = None
 
     for q in questions:
-        q_part = q.get("part")
-        if has_parts and q_part and q_part != current_part:
-            current_part = q_part
-            part_qs = [x for x in questions if x.get("part") == current_part]
-            part_m = sum(int(x.get("marks", 0)) for x in part_qs)
-
-            part_row = q_table.add_row()
-            merged_cell = part_row.cells[0]
-            for c in part_row.cells[1:]:
+        q_unit = q.get("unit")
+        if q_unit is not None and q_unit != current_unit:
+            current_unit = q_unit
+            unit_row = q_table.add_row()
+            merged_cell = unit_row.cells[0]
+            for c in unit_row.cells[1:]:
                 merged_cell.merge(c)
 
-            merged_cell.text = f"{current_part.upper()} — ({part_m} Marks)"
+            merged_cell.text = f"UNIT {current_unit}"
             p = merged_cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             for r in p.runs:
                 r.bold = True
-                r.font.size = Pt(9.5)
+                r.font.size = Pt(10)
                 r.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
 
             shading = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
@@ -285,7 +281,7 @@ def create_docx_exam_paper(
 
         prev_q = q
 
-    # 4. Reference Section: Course Outcomes & Revised Bloom's Taxonomy
+    # 4. Reference Block: Course Outcomes & Revised Bloom's Taxonomy
     if outcomes:
         doc.add_paragraph("")
         doc.add_paragraph("―" * 58).alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -304,7 +300,7 @@ def create_docx_exam_paper(
     bt_run.font.size = Pt(8.5)
     bt_run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
 
-    # 5. Substep 2.1: Model Answers & Scheme of Evaluation Section (including OR format)
+    # 5. Substep 2.1: Model Answers & Scheme of Evaluation (including OR format)
     has_any_answers = include_answers and any(q.get("answer") for q in questions)
     if has_any_answers:
         doc.add_page_break()
@@ -579,14 +575,15 @@ def create_pdf_exam_paper(
         textColor=colors.white,
         fontName="Helvetica-Bold",
     )
-    part_style = ParagraphStyle(
-        "PartCell",
+    unit_style = ParagraphStyle(
+        "UnitCell",
         parent=styles["Normal"],
-        fontSize=9,
-        leading=12,
+        fontSize=9.5,
+        leading=13,
         textColor=colors.HexColor("#1E3A8A"),
         fontName="Helvetica-Bold",
     )
+    part_style = unit_style
     or_style = ParagraphStyle(
         "OrChoiceCell",
         parent=styles["Normal"],
@@ -708,24 +705,20 @@ def create_pdf_exam_paper(
         col_widths = [45, 335, 45, 45, 50]
 
     table_data = [table_headers]
-    has_parts = any("part" in q for q in questions)
-    current_part = None
-    part_rows_indices = []
+    current_unit = None
+    unit_rows_indices = []
     or_rows_indices = []
     prev_q: Optional[dict[str, Any]] = None
 
     for q in questions:
-        q_part = q.get("part")
-        if has_parts and q_part and q_part != current_part:
-            current_part = q_part
-            part_qs = [x for x in questions if x.get("part") == current_part]
-            part_m = sum(int(x.get("marks", 0)) for x in part_qs)
-
+        q_unit = q.get("unit")
+        if q_unit is not None and q_unit != current_unit:
+            current_unit = q_unit
             row_idx = len(table_data)
-            part_rows_indices.append(row_idx)
+            unit_rows_indices.append(row_idx)
             empty_cells = [""] * (len(col_widths) - 1)
             table_data.append([
-                Paragraph(f"{current_part.upper()} — ({part_m} Marks)", part_style),
+                Paragraph(f"UNIT {current_unit}", unit_style),
                 *empty_cells,
             ])
 
@@ -781,9 +774,9 @@ def create_pdf_exam_paper(
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
     ]
 
-    for p_idx in part_rows_indices:
-        t_style.append(("SPAN", (0, p_idx), (-1, p_idx)))
-        t_style.append(("BACKGROUND", (0, p_idx), (-1, p_idx), colors.HexColor("#F1F5F9")))
+    for u_idx in unit_rows_indices:
+        t_style.append(("SPAN", (0, u_idx), (-1, u_idx)))
+        t_style.append(("BACKGROUND", (0, u_idx), (-1, u_idx), colors.HexColor("#F1F5F9")))
 
     for or_idx in or_rows_indices:
         t_style.append(("SPAN", (0, or_idx), (-1, or_idx)))
@@ -809,7 +802,7 @@ def create_pdf_exam_paper(
         )
     )
 
-    # 5. Substep 2.1: Model Answers Section in PDF
+    # 5. Substep 2.1: Model Answers in PDF
     has_any_answers = include_answers and any(q.get("answer") for q in questions)
     if has_any_answers:
         elements.append(PageBreak())

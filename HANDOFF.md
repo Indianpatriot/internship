@@ -37,7 +37,7 @@ class Slot(TypedDict, total=False):
     marks: int                      # Exact integer marks for this slot
     alternative_group: Optional[str]# Group ID for choice questions (e.g., "U1"); None for compulsory
     id: str                         # Display ID (e.g., "1(a)", "4")
-    part: str                       # Exam section (e.g., "Unit 1" or "Part A")
+    unit: int                       # 1-based unit identifier (e.g., 1..5)
     knowledge_dimension: str        # Revised Bloom's knowledge dimension (e.g., "Conceptual")
     kd: str                         # Short alias for knowledge_dimension
 ```

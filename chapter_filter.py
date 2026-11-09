@@ -23,26 +23,42 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not chunks:
         return []
 
-    chapter_dict: dict[str, dict[str, Any]] = {}
+    from ingestion.heading_detect import is_non_content_title
+
+    distinct_books = {c.get("book_id") or c.get("book_title") for c in chunks if c.get("book_id") or c.get("book_title")}
+    multiple_books = len(distinct_books) > 1
+
+    chapter_dict: dict[Any, dict[str, Any]] = {}
     for c in chunks:
         chap = c.get("chapter")
-        if not chap or chap == "Document":
+        if not chap or chap == "Document" or is_non_content_title(chap):
             continue
 
         p_start = c.get("page_start", 0)
         p_end = c.get("page_end", p_start)
         sec = c.get("section", "")
+        book_label = c.get("book_title") or c.get("display_label") or c.get("book_id") or ""
 
-        if chap not in chapter_dict:
-            chapter_dict[chap] = {
-                "chapter": chap,
+        if multiple_books and book_label and not str(chap).startswith(f"{book_label} -"):
+            display_chap = f"{book_label} - {chap}"
+        else:
+            display_chap = chap
+
+        dict_key = (book_label, chap) if multiple_books else chap
+
+        if dict_key not in chapter_dict:
+            chapter_dict[dict_key] = {
+                "chapter": display_chap,
+                "raw_chapter": chap,
+                "book_id": c.get("book_id", ""),
+                "book_title": book_label,
                 "chunk_count": 0,
                 "page_start": p_start,
                 "page_end": p_end,
                 "sections": set(),
             }
 
-        entry = chapter_dict[chap]
+        entry = chapter_dict[dict_key]
         entry["chunk_count"] += 1
         entry["page_start"] = min(entry["page_start"], p_start)
         entry["page_end"] = max(entry["page_end"], p_end)
@@ -50,7 +66,16 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             entry["sections"].add(sec)
 
     # Sort strictly by book order (page_start)
-    sorted_chapters = sorted(chapter_dict.values(), key=lambda x: (x["page_start"], x["chapter"]))
+    if multiple_books:
+        sorted_chapters = sorted(
+            chapter_dict.values(),
+            key=lambda x: (x["book_title"], x["page_start"], x["chapter"])
+        )
+    else:
+        sorted_chapters = sorted(
+            chapter_dict.values(),
+            key=lambda x: (x["page_start"], x["chapter"])
+        )
 
     result = []
     for entry in sorted_chapters:
@@ -59,6 +84,9 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         page_str = f"p. {p_s}" if p_s == p_e else f"pp. {p_s}–{p_e}"
         result.append({
             "chapter": entry["chapter"],
+            "raw_chapter": entry.get("raw_chapter", entry["chapter"]),
+            "book_id": entry.get("book_id", ""),
+            "book_title": entry.get("book_title", ""),
             "chunk_count": entry["chunk_count"],
             "page_start": p_s,
             "page_end": p_e,
@@ -95,10 +123,19 @@ def filter_chunks(
 
     for c in chunks:
         chap = c.get("chapter")
+        book_label = c.get("book_title") or c.get("book_id") or ""
+        disambiguated = f"{book_label} - {chap}" if (book_label and not str(chap).startswith(f"{book_label} -")) else chap
 
         # Chapter filter
-        if chap_set is not None and chap not in chap_set:
-            continue
+        if chap_set is not None:
+            if disambiguated in chap_set:
+                pass
+            elif not any(" - " in s for s in chap_set) and chap in chap_set:
+                pass
+            elif chap in chap_set:
+                pass
+            else:
+                continue
 
         # Section filter (if specified)
         if sec_set is not None and c.get("section") and c.get("section") not in sec_set:

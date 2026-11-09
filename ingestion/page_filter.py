@@ -187,6 +187,17 @@ def _is_chapter_content(text: str, lines: Optional[list[str]] = None) -> bool:
     if _looks_like_index(raw_lines) and re.search(r"\b(subject\s+index|author\s+index|\bindex\b)\b", t_lower):
         return False
 
+    # Prominent front matter markers (heading/title) disqualify page as chapter content
+    first_few_lines = " ".join(raw_lines[:4]).lower() if raw_lines else t_lower[:200]
+    for pat, _ in FRONT_MATTER_MARKERS:
+        if re.search(pat, first_few_lines):
+            return False
+
+    # Prominent back matter markers disqualify page as chapter content
+    for pat, _ in BACK_MATTER_MARKERS:
+        if re.search(pat, first_few_lines):
+            return False
+
     # Chapter / unit / module indicator anywhere in text
     if re.search(r"\b(chapter|unit|module|part)\s+([0-9ivxlc]+|[a-z]+)\b", t_lower):
         return True
@@ -475,13 +486,6 @@ def filter_pages(
         in_middle_zone = not in_front_zone and not in_back_zone
 
         # -------------------------------------------------------------------
-        # Rule 3 / Safety Guard: NEVER drop chapter content or exercises
-        # -------------------------------------------------------------------
-        if _is_chapter_content(text, raw_lines):
-            kept.append(page)
-            continue
-
-        # -------------------------------------------------------------------
         # Requirement 2c: Explicit boundary before first chapter or after back matter
         # -------------------------------------------------------------------
         if first_chapter_page is not None and p_num < first_chapter_page:
@@ -510,6 +514,13 @@ def filter_pages(
             elif word_count < 30:
                 reason = f"insufficient_words (< 30 words: {word_count})"
             skipped.append(SkippedPage(page=page, reason=reason))
+            continue
+
+        # -------------------------------------------------------------------
+        # Rule 3 / Safety Guard: NEVER drop chapter content or exercises
+        # -------------------------------------------------------------------
+        if _is_chapter_content(text, raw_lines):
+            kept.append(page)
             continue
 
         # -------------------------------------------------------------------
