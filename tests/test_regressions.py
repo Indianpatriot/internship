@@ -713,3 +713,22 @@ def test_quality_problem8_paper_header_values():
     assert "20" not in q_count_text
     assert "26" not in q_count_text
 
+
+def test_clean_book_name_not_shadowed_in_app():
+    """Verify that clean_book_name imported in app.py is never assigned as a string variable."""
+    import ast
+    with open("app.py", "r") as f:
+        tree = ast.parse(f.read(), filename="app.py")
+
+    assigned_targets = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned_targets.add(target.id)
+
+    assert "clean_book_name" not in assigned_targets, (
+        "clean_book_name imported function is shadowed by a variable assignment in app.py"
+    )
+
+

@@ -986,15 +986,15 @@ if uploaded_pdfs:
         file_bytes = up_file.getvalue()
         file_hash = hashlib.sha256(file_bytes).hexdigest()[:12]
         orig_stem = Path(up_file.name).stem
-        clean_book_name = re.sub(r"^[0-9a-f]{8,64}[_-]+", "", orig_stem, flags=re.I).strip("_- ")
-        clean_book_name = clean_book_name.replace("-", " ").replace("_", " ").strip()
+        clean_stem = re.sub(r"^[0-9a-f]{8,64}[_-]+", "", orig_stem, flags=re.I).strip("_- ")
+        clean_stem = clean_stem.replace("-", " ").replace("_", " ").strip()
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", up_file.name)
         save_path = upload_dir / f"{file_hash}_{safe_name}"
         if not save_path.exists() or save_path.stat().st_size != len(file_bytes):
             with open(save_path, "wb") as f:
                 f.write(file_bytes)
         saved_paths.append(str(save_path))
-        titles.append(f"{idx} {clean_book_name}")
+        titles.append(f"{idx} {clean_stem}")
 
     library = load_library(saved_paths, titles=titles)
     raw_chunks = library.get("chunks", [])
