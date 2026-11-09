@@ -7,12 +7,29 @@ import re
 from config import MAX_CHUNK_WORDS, MIN_CHUNK_WORDS, OVERLAP_WORDS
 from ingestion.chunker import build_chunks
 from ingestion.heading_detect import detect_headings
+from ingestion.page_filter import filter_pages, lines_to_pages
 from ingestion.pdf_extract import load_pdf
 
 
 def ingest(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLAP_WORDS,
-           min_words=MIN_CHUNK_WORDS, book_id=None):
+           min_words=MIN_CHUNK_WORDS, book_id=None, filter_pages_enabled=True):
     lines, toc = load_pdf(pdf_path)
+
+    if filter_pages_enabled:
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            n_pages = len(doc)
+            doc.close()
+        except Exception:
+            n_pages = max(l["page"] for l in lines) if lines else 0
+
+        pages = lines_to_pages(lines, n_pages=n_pages)
+        fres = filter_pages(pages, toc_info=toc)
+        kept_nums = {p.page_number for p in fres.kept_pages}
+        if kept_nums:
+            lines = [l for l in lines if l["page"] in kept_nums]
+
     heads = detect_headings(lines, toc)
     chunks = build_chunks(lines, heads, max_words, overlap_words, min_words)
     stem = re.sub(r"[^a-z0-9]+", "-", os.path.splitext(os.path.basename(pdf_path))[0].lower()).strip("-")
@@ -22,6 +39,35 @@ def ingest(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLAP_WORDS,
         c["source"] = os.path.basename(pdf_path)
         c["book_id"] = bid
     return chunks
+
+
+def ingest_with_report(pdf_path, max_words=MAX_CHUNK_WORDS, overlap_words=OVERLAP_WORDS,
+                       min_words=MIN_CHUNK_WORDS, book_id=None):
+    """Ingest PDF and return both chunks and the page filter result report."""
+    lines, toc = load_pdf(pdf_path)
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        n_pages = len(doc)
+        doc.close()
+    except Exception:
+        n_pages = max(l["page"] for l in lines) if lines else 0
+
+    pages = lines_to_pages(lines, n_pages=n_pages)
+    fres = filter_pages(pages, toc_info=toc)
+    kept_nums = {p.page_number for p in fres.kept_pages}
+    if kept_nums:
+        lines = [l for l in lines if l["page"] in kept_nums]
+
+    heads = detect_headings(lines, toc)
+    chunks = build_chunks(lines, heads, max_words, overlap_words, min_words)
+    stem = re.sub(r"[^a-z0-9]+", "-", os.path.splitext(os.path.basename(pdf_path))[0].lower()).strip("-")
+    bid = book_id or stem
+    for i, c in enumerate(chunks):
+        c["chunk_id"] = f"{bid}_{i:04d}"
+        c["source"] = os.path.basename(pdf_path)
+        c["book_id"] = bid
+    return chunks, fres
 
 
 def save_chunks(chunks, out_path):

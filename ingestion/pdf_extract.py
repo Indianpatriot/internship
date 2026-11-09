@@ -74,3 +74,15 @@ def load_pdf(pdf_path):
     n_pages = len(doc)
     doc.close()
     return strip_margins(lines, n_pages), toc
+
+
+def extract_pages(pdf_path):
+    """Return (pages: list[PageText], toc)."""
+    from ingestion.page_filter import lines_to_pages
+
+    lines, toc = load_pdf(pdf_path)
+    doc = fitz.open(pdf_path)
+    n_pages = len(doc)
+    doc.close()
+    return lines_to_pages(lines, n_pages=n_pages), toc
+

@@ -15,3 +15,12 @@ MIN_CHUNK_WORDS = int(os.getenv("MIN_CHUNK_WORDS", "25"))
 MIN_CONTEXT_WORDS = 40      # chunks shorter than this are not used for questions
 MAX_CONTEXT_WORDS = 450     # context truncated to this before prompting
 ANSWER_MIN_SIMILARITY = float(os.getenv("ANSWER_MIN_SIMILARITY", "0.35"))
+
+# Course Outcomes constraints
+MIN_COS = 4
+MAX_COS = 6
+
+# Page filtering
+FILTER_USE_LLM = os.getenv("FILTER_USE_LLM", "false").lower() in ("1", "true", "yes")
+
+

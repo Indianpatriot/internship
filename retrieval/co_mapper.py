@@ -8,7 +8,7 @@ def _m():
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+        _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
     return _model
 
 

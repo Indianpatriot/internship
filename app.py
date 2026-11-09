@@ -10,11 +10,20 @@ import pandas as pd
 import streamlit as st
 
 import config
+from paper_preset import (
+    PaperPreset,
+    QuestionPlan,
+    UnitPlan,
+    make_preset,
+    format_paper,
+    PRESETS as PAPER_PRESETS,
+)
 from blueprint import (
     build_blueprint,
     get_50_mark_blueprint,
     get_25_mark_blueprint,
     calculate_blueprint_stats,
+    validate_outcomes,
 )
 from blooms.revised_taxonomy import (
     KNOWLEDGE_DIMENSIONS,
@@ -136,6 +145,7 @@ if "outcomes" not in st.session_state:
         {"code": "CO1", "desc": "Understand foundational concepts, terminology, and principles."},
         {"code": "CO2", "desc": "Analyze system architectures, evaluate performance metrics, and solve problems."},
         {"code": "CO3", "desc": "Apply design principles and evaluate trade-offs in real-world scenarios."},
+        {"code": "CO4", "desc": "Design and integrate modular components and validate system correctness."},
     ]
 
 available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
@@ -279,7 +289,20 @@ with st.expander("📋 Upload your scheme for a more precise paper.", expanded=F
                 st.session_state.outcomes = [
                     {"code": k, "desc": v} for k, v in parsed["outcomes"].items()
                 ]
-                st.success(f"✓ Extracted {len(parsed['outcomes'])} Course Outcomes and {len(parsed.get('units', []))} Units from scheme!")
+                n_parsed = len(parsed["outcomes"])
+                if n_parsed < config.MIN_COS:
+                    st.session_state.scheme_warning = (
+                        f"Extracted {n_parsed} Course Outcomes from scheme, but a paper requires at least "
+                        f"{config.MIN_COS}. Please add more outcomes below."
+                    )
+                elif n_parsed > config.MAX_COS:
+                    st.session_state.scheme_warning = (
+                        f"Extracted {n_parsed} Course Outcomes from scheme, but a paper allows at most "
+                        f"{config.MAX_COS}. Please remove outcomes below."
+                    )
+                else:
+                    st.session_state.scheme_warning = None
+                    st.success(f"✓ Extracted {n_parsed} Course Outcomes and {len(parsed.get('units', []))} Units from scheme!")
                 st.rerun()
             else:
                 st.warning("Scheme parsed, but no Course Outcomes (CO1..COn) were detected.")
@@ -289,6 +312,13 @@ with st.expander("📋 Upload your scheme for a more precise paper.", expanded=F
 # -----------------------------------------------------------------------------
 st.subheader("1. Course / Learning Outcomes")
 st.caption("Define the outcomes specific to your syllabus. Click '+ Add outcome' to append more.")
+
+if st.session_state.get("scheme_warning"):
+    st.warning(st.session_state.scheme_warning)
+
+total_outcomes = len(st.session_state.outcomes)
+can_delete = total_outcomes > config.MIN_COS
+can_add = total_outcomes < config.MAX_COS
 
 outcomes_to_remove = []
 for i, oc in enumerate(st.session_state.outcomes):
@@ -314,7 +344,7 @@ for i, oc in enumerate(st.session_state.outcomes):
     with col_del:
         if i == 0:
             st.caption("Action")
-        if st.button("🗑️", key=f"del_outcome_{i}", help="Delete outcome"):
+        if st.button("🗑️", key=f"del_outcome_{i}", help="Delete outcome", disabled=not can_delete):
             outcomes_to_remove.append(i)
 
 if outcomes_to_remove:
@@ -322,9 +352,9 @@ if outcomes_to_remove:
         st.session_state.outcomes.pop(idx)
     st.rerun()
 
-col_btn, _ = st.columns([2, 5])
+col_btn, col_cap = st.columns([2, 5])
 with col_btn:
-    if st.button("➕ Add outcome", key="btn_add_outcome"):
+    if st.button("➕ Add outcome", key="btn_add_outcome", disabled=not can_add):
         existing_nums = [
             int(m.group(1))
             for o in st.session_state.outcomes
@@ -333,6 +363,13 @@ with col_btn:
         next_num = (max(existing_nums) + 1) if existing_nums else len(st.session_state.outcomes) + 1
         st.session_state.outcomes.append({"code": f"CO{next_num}", "desc": ""})
         st.rerun()
+    if not can_add:
+        st.caption(f"Maximum {config.MAX_COS} outcomes")
+
+with col_cap:
+    if not can_delete:
+        st.caption(f"Minimum {config.MIN_COS} outcomes")
+
 
 st.divider()
 
@@ -345,9 +382,44 @@ st.caption(
     "Map each question across the <b>Cognitive Process Dimension (L1–L6)</b> and <b>Knowledge Dimension (Factual, Conceptual, Procedural, Metacognitive)</b>."
 )
 
-available_cos = [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
+# Ignore outcomes with an empty description (they do not count toward the total)
+valid_cos = []
+seen_cos = set()
+for o in st.session_state.outcomes:
+    c = o.get("code", "").strip()
+    d = o.get("desc", "").strip()
+    if c and d and c not in seen_cos:
+        seen_cos.add(c)
+        valid_cos.append(c)
+
+outcomes_valid, outcome_err_msg = validate_outcomes(len(valid_cos))
+if outcomes_valid and "scheme_warning" in st.session_state:
+    st.session_state.scheme_warning = None
+
+available_cos = valid_cos if valid_cos else [o["code"].strip() for o in st.session_state.outcomes if o["code"].strip()]
 if not available_cos:
     available_cos = ["CO1"]
+
+def rebuild_co_weights(current_cos: list[str]) -> dict[str, float]:
+    """Rebuild CO weights dict from current outcome codes, dropping stale keys."""
+    # Drop stale session_state keys for deleted or renamed outcomes
+    stale_keys = [
+        k for k in list(st.session_state.keys())
+        if (k.startswith("w_co_") and k[len("w_co_"):] not in current_cos)
+        or (k.startswith("slider_co_") and k[len("slider_co_"):] not in current_cos)
+    ]
+    for k in stale_keys:
+        del st.session_state[k]
+
+    equal_pct = max(5, int(100 / max(len(current_cos), 1)))
+    weights = {}
+    for c in current_cos:
+        val = st.session_state.get(f"w_co_{c}", equal_pct)
+        st.session_state[f"w_co_{c}"] = val
+        weights[c] = val
+
+    tot = max(sum(weights.values()), 1)
+    return {c: v / tot for c, v in weights.items()}
 
 # Substep 1.1: UI Controls (Preset dropdown 50/100, Sub-questions input, Weightage sliders)
 col_preset, col_subq = st.columns([1.5, 1.5])
@@ -364,16 +436,118 @@ with col_preset:
         index=0 if "selected_preset_idx" not in st.session_state else st.session_state.selected_preset_idx,
         help="Select 50-mark standard exam, 100-mark exam with internal choice, or custom structure.",
     )
+
+is_100_choice = "100" in selected_preset
+target_unit_marks = 20 if is_100_choice else (10 if "50" in selected_preset else 20)
+num_preset_units = 5
+
+# Reset sub-question marks defaults if target_unit_marks changes
+prev_target_marks = st.session_state.get("_prev_target_unit_marks")
+if prev_target_marks != target_unit_marks:
+    st.session_state._prev_target_unit_marks = target_unit_marks
+    for u in range(1, num_preset_units + 1):
+        if f"unit_{u}_marks_input" in st.session_state:
+            del st.session_state[f"unit_{u}_marks_input"]
+
 with col_subq:
     sub_questions_input = st.number_input(
         "Sub-questions per question",
-        min_value=1,
+        min_value=0,
         max_value=4,
         value=int(st.session_state.get("sub_questions_count", 2)),
         step=1,
-        help="Number of subparts (e.g. (a), (b)) generated per main question slot.",
+        help="Default number of subparts (0 for full question, 2 for (a) & (b), etc.) per question slot.",
     )
     st.session_state.sub_questions_count = sub_questions_input
+
+# Step 5: Unit Question & Sub-question Structure Configuration
+unit_sub_marks: dict[int, list[int]] = {}
+unit_structure_valid = True
+unit_validation_errors: list[str] = []
+
+with st.expander("📐 Configure Questions & Sub-questions Per Unit", expanded=is_100_choice):
+    st.caption(
+        f"For each unit, configure the **number of sub-questions** (0 for none) and the **marks of each**, "
+        f"with a live check that marks add up to the unit total ({target_unit_marks} marks)."
+    )
+
+    h_u, h_cnt, h_m, h_chk = st.columns([1.2, 1.6, 2.4, 2.2])
+    h_u.caption("**Unit**")
+    h_cnt.caption("**Sub-questions (0 = None)**")
+    h_m.caption(f"**Marks per Sub-question (Sum = {target_unit_marks})**")
+    h_chk.caption("**Live Marks Check**")
+
+    for u in range(1, num_preset_units + 1):
+        u_c1, u_c2, u_c3, u_c4 = st.columns([1.2, 1.6, 2.4, 2.2])
+        with u_c1:
+            st.markdown(f"**Unit {u}**")
+            st.caption(f"{target_unit_marks}m / option")
+
+        with u_c2:
+            sq_cnt = st.number_input(
+                f"U{u} Sub-questions",
+                min_value=0,
+                max_value=4,
+                value=int(st.session_state.get(f"unit_{u}_sq_count", sub_questions_input)),
+                step=1,
+                key=f"unit_{u}_sq_count",
+                label_visibility="collapsed",
+            )
+
+        with u_c3:
+            if sq_cnt == 0:
+                st.text_input(
+                    f"U{u} Marks",
+                    value=f"Full {target_unit_marks}m question",
+                    disabled=True,
+                    key=f"unit_{u}_marks_display",
+                    label_visibility="collapsed",
+                )
+                unit_sub_marks[u] = []
+                m_valid = True
+                m_status = f"✅ {target_unit_marks} / {target_unit_marks} marks"
+            else:
+                base_m = target_unit_marks // sq_cnt
+                rem_m = target_unit_marks % sq_cnt
+                calc_default_str = ", ".join(str(base_m + 1 if i < rem_m else base_m) for i in range(sq_cnt))
+                default_val = st.session_state.get(f"unit_{u}_marks_input", calc_default_str)
+                try:
+                    curr_parsed = [int(x.strip()) for x in default_val.split(",") if x.strip()]
+                    if len(curr_parsed) != sq_cnt:
+                        default_val = calc_default_str
+                except Exception:
+                    default_val = calc_default_str
+
+                marks_str = st.text_input(
+                    f"U{u} Marks",
+                    value=default_val,
+                    key=f"unit_{u}_marks_input",
+                    label_visibility="collapsed",
+                    placeholder="e.g. 10, 10",
+                )
+                try:
+                    parsed_m = [int(x.strip()) for x in marks_str.split(",") if x.strip()]
+                except ValueError:
+                    parsed_m = []
+
+                if len(parsed_m) != sq_cnt:
+                    m_valid = False
+                    m_status = f"❌ Enter {sq_cnt} values"
+                    unit_validation_errors.append(f"Unit {u}: Expected {sq_cnt} values, got {len(parsed_m)}.")
+                elif sum(parsed_m) != target_unit_marks:
+                    m_valid = False
+                    m_status = f"❌ Sum: {sum(parsed_m)}m (needs {target_unit_marks}m)"
+                    unit_validation_errors.append(f"Unit {u}: Sub-question marks sum to {sum(parsed_m)}, expected {target_unit_marks}.")
+                else:
+                    m_valid = True
+                    m_status = f"✅ {sum(parsed_m)} / {target_unit_marks} marks"
+                    unit_sub_marks[u] = parsed_m
+
+                if not m_valid:
+                    unit_structure_valid = False
+
+        with u_c4:
+            st.markdown(f"**{m_status}**")
 
 with st.expander("⚖️ Bloom's Taxonomy & Course Outcome Weightage Sliders", expanded=False):
     col_bt_w, col_co_w = st.columns(2)
@@ -405,51 +579,67 @@ with st.expander("⚖️ Bloom's Taxonomy & Course Outcome Weightage Sliders", e
         if tot_co_w != 100:
             st.caption(f"Current CO total: {tot_co_w}% (will be normalized proportionally)")
 
+# Show any blueprint warnings
+if st.session_state.get("bp_warnings"):
+    for w in st.session_state.bp_warnings:
+        st.warning(w)
+
 # Preset Action Buttons
 col_p1, col_p2, col_p3 = st.columns([2.5, 2.5, 2])
 with col_p1:
-    if st.button("⚙️ Apply Preset & Weightages", use_container_width=True):
+    can_apply = outcomes_valid and unit_structure_valid
+    apply_help = outcome_err_msg if not outcomes_valid else (unit_validation_errors[0] if not unit_structure_valid else None)
+    btn_apply = st.button(
+        "⚙️ Apply Preset & Weightages",
+        use_container_width=True,
+        disabled=not can_apply,
+        help=apply_help,
+    )
+    if not can_apply:
+        st.caption(f"⚠️ {apply_help}")
+    if btn_apply:
         tot_bt_val = max(w_l12 + w_l34 + w_l56, 1)
         eff_bt_weights = {
             "L1-L2": w_l12 / tot_bt_val,
             "L3-L4": w_l34 / tot_bt_val,
             "L5-L6": w_l56 / tot_bt_val,
         }
-        tot_co_val = max(sum(co_weights_input.values()), 1)
-        eff_co_weights = {
-            c: v / tot_co_val for c, v in co_weights_input.items()
-        }
+        eff_co_weights = rebuild_co_weights(valid_cos)
         st.session_state.target_weights = {"bt": eff_bt_weights, "co": eff_co_weights}
 
-        if "100" in selected_preset:
-            bp = build_blueprint(
-                preset=100,
-                sub_question_counts=sub_questions_input,
-                bt_weights=eff_bt_weights,
-                co_weights=eff_co_weights,
-                seed=42,
-            )
-            st.session_state.slots = bp["slots"]
-            st.session_state.selected_preset_idx = 1
-        elif "25" in selected_preset:
-            st.session_state.slots = get_25_mark_blueprint(available_cos)
-            st.session_state.selected_preset_idx = 2
-        else:
-            bp = build_blueprint(
-                preset=50,
-                sub_question_counts=sub_questions_input,
-                bt_weights=eff_bt_weights,
-                co_weights=eff_co_weights,
-                seed=42,
-            )
-            st.session_state.slots = bp["slots"]
-            st.session_state.selected_preset_idx = 0
-        st.rerun()
+        try:
+            if "25" in selected_preset:
+                st.session_state.slots = get_25_mark_blueprint(valid_cos)
+                st.session_state.selected_preset_idx = 2
+                st.session_state.bp_warnings = []
+            else:
+                preset_obj = make_preset(
+                    name=selected_preset,
+                    units=num_preset_units,
+                    marks_per_unit=target_unit_marks,
+                    options=2 if (is_100_choice or "Custom" in selected_preset) else 1,
+                    sub_marks=unit_sub_marks,
+                )
+                bp = build_blueprint(
+                    preset=preset_obj,
+                    bt_weights=eff_bt_weights,
+                    co_weights=eff_co_weights,
+                    outcomes=valid_cos,
+                    seed=42,
+                )
+                st.session_state.slots = bp["slots"]
+                st.session_state.selected_preset_idx = 1 if is_100_choice else (0 if "50" in selected_preset else 3)
+                st.session_state.bp_warnings = bp.get("warnings", [])
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
 
 with col_p2:
-    if st.button("🎓 Standard 50-Mark Blueprint", use_container_width=True):
-        st.session_state.slots = get_50_mark_blueprint(available_cos)
+    if st.button("🎓 Standard 50-Mark Blueprint", use_container_width=True, disabled=not outcomes_valid):
+        st.session_state.slots = get_50_mark_blueprint(valid_cos)
         st.session_state.selected_preset_idx = 0
+        st.session_state.bp_warnings = []
         st.rerun()
 
 with col_p3:
@@ -759,21 +949,26 @@ if uploaded_pdf:
             f"Some questions might be duplicated or left unfilled."
         )
 
-col_gen, _ = st.columns([2.5, 4.5])
+col_gen, col_gen_msg = st.columns([2.5, 4.5])
 with col_gen:
+    generate_disabled = (not can_generate) or (not outcomes_valid)
+    gen_help_text = outcome_err_msg if not outcomes_valid else ("Select at least one chapter to enable." if not can_generate else "Generate exam questions")
     generate_clicked = st.button(
         "🚀 Generate Question Paper",
         type="primary",
         use_container_width=True,
-        disabled=not can_generate,
-        help="Select at least one chapter to enable." if not can_generate else "Generate exam questions",
+        disabled=generate_disabled,
+        help=gen_help_text,
     )
+with col_gen_msg:
+    if not outcomes_valid:
+        st.caption(f"⚠️ {outcome_err_msg}")
 
 if generate_clicked:
     if not uploaded_pdf:
         st.error("Please upload a textbook PDF before generating.")
-    elif not st.session_state.outcomes or not any(o["desc"].strip() for o in st.session_state.outcomes):
-        st.error("Please provide at least one Course Outcome with a description.")
+    elif not outcomes_valid:
+        st.error(outcome_err_msg)
     elif not st.session_state.slots:
         st.error("Please add at least one question slot in the blueprint.")
     elif not filtered_chunks:
@@ -865,22 +1060,27 @@ if st.session_state.results:
         ]
         df = pd.DataFrame(table_data)
 
-        st.dataframe(
-            df,
-            column_config={
-                "Section": st.column_config.TextColumn("Section", width="small"),
-                "S.No": st.column_config.TextColumn("S.No", width="small"),
-                "Question": st.column_config.TextColumn("Question Text", width="large"),
-                "Marks": st.column_config.NumberColumn("Marks", width="small"),
-                "BT (Cognitive)": st.column_config.TextColumn("BT Level", width="small"),
-                "Knowledge Dim": st.column_config.TextColumn("Knowledge (KD)", width="medium"),
-                "Outcome": st.column_config.TextColumn("Course Outcome", width="small"),
-                "Source Chapter": st.column_config.TextColumn("Source Chapter", width="medium"),
-                "Source Page": st.column_config.TextColumn("Page", width="small"),
-            },
-            hide_index=True,
-            use_container_width=True,
-        )
+        tab_fmt, tab_tbl = st.tabs(["📄 Formatted Question Paper (Unit & Choice Layout)", "📊 Detailed Table View"])
+        with tab_fmt:
+            st.markdown("##### 📝 Exam Paper Layout (Internal Choice OR Format)")
+            st.code(format_paper(questions), language="markdown")
+        with tab_tbl:
+            st.dataframe(
+                df,
+                column_config={
+                    "Section": st.column_config.TextColumn("Section", width="small"),
+                    "S.No": st.column_config.TextColumn("S.No", width="small"),
+                    "Question": st.column_config.TextColumn("Question Text", width="large"),
+                    "Marks": st.column_config.NumberColumn("Marks", width="small"),
+                    "BT (Cognitive)": st.column_config.TextColumn("BT Level", width="small"),
+                    "Knowledge Dim": st.column_config.TextColumn("Knowledge (KD)", width="medium"),
+                    "Outcome": st.column_config.TextColumn("Course Outcome", width="small"),
+                    "Source Chapter": st.column_config.TextColumn("Source Chapter", width="medium"),
+                    "Source Page": st.column_config.TextColumn("Page", width="small"),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
 
         # Substep 1.2 & Step 2: Export Controls & Cumulative Totals Checkbox
         st.write("#### 📥 Export Formatted Question Paper & Evaluation Scheme")

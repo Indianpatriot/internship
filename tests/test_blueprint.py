@@ -1,6 +1,8 @@
 """Tests for Blueprint Engine (Task 1)."""
 import pytest
-from blueprint import build_blueprint
+import config
+from blueprint import build_blueprint, validate_outcomes
+
 
 
 def test_50_preset_structure():
@@ -125,3 +127,110 @@ def test_explicit_sub_question_marks_validation():
     # Invalid explicit marks not summing to 20
     with pytest.raises(ValueError, match="Sub-question marks"):
         build_blueprint(preset=100, sub_question_marks=[10, 5])
+
+
+def test_stale_co_weights_ignored_with_warning():
+    """4 outcomes (CO1-CO4) but co_weights containing a stale CO5 -> builds, CO5 ignored, warning returned."""
+    outcomes = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
+    co_weights = {f"CO{i}": 0.25 for i in range(1, config.MIN_COS + 1)}
+    co_weights["CO5"] = 0.25
+
+    bp = build_blueprint(preset=100, outcomes=outcomes, co_weights=co_weights)
+    assert bp["slots"]
+    assert "CO5" not in bp["report"]["co"]
+    assert any("CO5" in w for w in bp["warnings"])
+    assert sum(info["target_pct"] for info in bp["report"]["co"].values()) == pytest.approx(100.0, abs=1e-2)
+
+
+def test_missing_co_weight_gets_equal_share():
+    """5 outcomes but co_weights only for CO1-CO4 -> builds, CO5 gets a share, weights sum to 1.0."""
+    outcomes = [f"CO{i}" for i in range(1, config.MIN_COS + 2)]  # 5 outcomes
+    co_weights = {f"CO{i}": 0.25 for i in range(1, config.MIN_COS + 1)}  # CO1-CO4
+
+    bp = build_blueprint(preset=100, outcomes=outcomes, co_weights=co_weights)
+    assert bp["slots"]
+    assert "CO5" in bp["report"]["co"]
+    assert bp["report"]["co"]["CO5"]["target_pct"] > 0
+    assert sum(info["target_pct"] for info in bp["report"]["co"].values()) == pytest.approx(100.0, abs=1e-2)
+
+
+def test_outcome_count_upper_limit():
+    """MAX_COS outcomes builds; MAX_COS + 1 outcomes raises ValueError mentioning the maximum."""
+    valid_cos = [f"CO{i}" for i in range(1, config.MAX_COS + 1)]
+    bp = build_blueprint(preset=100, outcomes=valid_cos)
+    assert len(bp["slots"]) > 0
+
+    too_many_cos = [f"CO{i}" for i in range(1, config.MAX_COS + 2)]
+    with pytest.raises(ValueError, match=f"at most {config.MAX_COS} course outcomes"):
+        build_blueprint(preset=100, outcomes=too_many_cos)
+
+
+def test_outcome_count_lower_limit():
+    """Fewer than MIN_COS outcomes raises ValueError mentioning minimum; zero outcomes raises same error."""
+    too_few_cos = [f"CO{i}" for i in range(1, config.MIN_COS)]
+    with pytest.raises(ValueError, match=f"at least {config.MIN_COS} course outcomes"):
+        build_blueprint(preset=100, outcomes=too_few_cos)
+
+    with pytest.raises(ValueError, match=f"at least {config.MIN_COS} course outcomes"):
+        build_blueprint(preset=100, outcomes=[])
+
+
+def test_unit_co_map_nonexistent_code_dropped_with_warning():
+    """unit_co_map referencing a nonexistent code -> builds with a warning."""
+    outcomes = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
+    unit_co_map = {1: ["CO1", "NONEXISTENT_CO"], 2: ["CO2"], 3: ["CO3"], 4: ["CO4"], 5: ["CO1"]}
+    bp = build_blueprint(preset=100, outcomes=outcomes, unit_co_map=unit_co_map)
+    assert bp["slots"]
+    assert any("NONEXISTENT_CO" in w for w in bp["warnings"])
+    assert all(s["co"] != "NONEXISTENT_CO" for s in bp["slots"])
+
+
+def test_rename_outcome_scenario():
+    """Rename scenario: outcome CO3 renamed to LO3 -> no KeyError, weights sum to 1.0."""
+    outcomes = ["CO1", "CO2", "LO3", "CO4"]
+    stale_co_weights = {"CO1": 0.25, "CO2": 0.25, "CO3": 0.25, "CO4": 0.25}
+
+    bp = build_blueprint(preset=100, outcomes=outcomes, co_weights=stale_co_weights)
+    assert bp["slots"]
+    assert "LO3" in bp["report"]["co"]
+    assert "CO3" not in bp["report"]["co"]
+    assert sum(info["target_pct"] for info in bp["report"]["co"].values()) == pytest.approx(100.0, abs=1e-2)
+
+
+def test_duplicate_or_blank_codes_not_double_counted():
+    """Duplicate or blank codes are not double-counted."""
+    outcomes = ["CO1", "CO2", "CO3", "CO4", "CO4", "", "   "]
+    bp = build_blueprint(preset=100, outcomes=outcomes)
+    assert len(bp["report"]["co"]) == config.MIN_COS
+    assert set(bp["report"]["co"].keys()) == {"CO1", "CO2", "CO3", "CO4"}
+
+    # If unique non-empty count drops below MIN_COS, raises ValueError
+    insufficient = ["CO1", "CO1", "CO2", "CO3", "", "  "]
+    with pytest.raises(ValueError, match=f"at least {config.MIN_COS} course outcomes"):
+        build_blueprint(preset=100, outcomes=insufficient)
+
+
+def test_validate_outcomes_helper():
+    """Test UI-level validate_outcomes helper: 3 -> invalid, 4 -> valid, 6 -> valid, 7 -> invalid."""
+    ok_below, msg_below = validate_outcomes(config.MIN_COS - 1)
+    assert not ok_below
+    assert f"at least {config.MIN_COS}" in msg_below
+
+    ok_min, msg_min = validate_outcomes(config.MIN_COS)
+    assert ok_min
+    assert msg_min == ""
+
+    ok_max, msg_max = validate_outcomes(config.MAX_COS)
+    assert ok_max
+    assert msg_max == ""
+
+    ok_above, msg_above = validate_outcomes(config.MAX_COS + 1)
+    assert not ok_above
+    assert f"at most {config.MAX_COS}" in msg_above
+
+    # Also test list inputs
+    assert not validate_outcomes([f"CO{i}" for i in range(1, config.MIN_COS)])[0]
+    assert validate_outcomes([f"CO{i}" for i in range(1, config.MIN_COS + 1)])[0]
+    assert validate_outcomes([f"CO{i}" for i in range(1, config.MAX_COS + 1)])[0]
+    assert not validate_outcomes([f"CO{i}" for i in range(1, config.MAX_COS + 2)])[0]
+

@@ -9,6 +9,7 @@ Implements:
 import random
 from typing import Any, Optional
 
+import config
 from blooms.revised_taxonomy import (
     KNOWLEDGE_DIMENSIONS,
     compute_2d_taxonomy_matrix,
@@ -21,6 +22,7 @@ from contracts import (
     Weights,
     validate_weights,
 )
+
 
 PRESETS: dict[Any, dict[str, Any]] = {
     50: {
@@ -77,6 +79,47 @@ def _split_marks(total_m: int, count: int) -> list[int]:
     return [base + 1 if i < rem else base for i in range(count)]
 
 
+def validate_outcomes(outcomes: Any, require_desc: bool = False) -> tuple[bool, str]:
+    """Validate course outcomes count against MIN_COS and MAX_COS project constraints.
+
+    Args:
+        outcomes: An int count, list/tuple/set of codes or dicts, or a dict.
+        require_desc: If True, outcomes with empty descriptions do not count.
+
+    Returns:
+        (ok, message): (True, "") if MIN_COS <= count <= MAX_COS, else (False, error_message).
+    """
+    if isinstance(outcomes, int):
+        n = outcomes
+    elif isinstance(outcomes, dict):
+        if require_desc:
+            valid = [k for k, v in outcomes.items() if str(k).strip() and str(v).strip()]
+        else:
+            valid = [k for k in outcomes.keys() if str(k).strip()]
+        n = len(set(valid))
+    elif hasattr(outcomes, "__iter__") and not isinstance(outcomes, (str, bytes)):
+        seen = set()
+        for item in outcomes:
+            if isinstance(item, dict):
+                code = str(item.get("code", "")).strip()
+                desc = str(item.get("desc", "")).strip()
+                if code and (not require_desc or desc):
+                    seen.add(code)
+            else:
+                code = str(item).strip()
+                if code:
+                    seen.add(code)
+        n = len(seen)
+    else:
+        n = 0
+
+    if n < config.MIN_COS:
+        return False, f"Add at least {config.MIN_COS} course outcomes (you have {n})"
+    if n > config.MAX_COS:
+        return False, f"A paper can have at most {config.MAX_COS} course outcomes (you have {n})"
+    return True, ""
+
+
 def build_blueprint(
     preset: Optional[Any] = None,
     total_marks: Optional[int] = None,
@@ -88,6 +131,7 @@ def build_blueprint(
     co_weights: Optional[dict[str, float]] = None,
     unit_co_map: Optional[dict[Any, list[str]]] = None,
     seed: Optional[int] = None,
+    outcomes: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Build a balanced question paper blueprint using deficit-based greedy allocation.
 
@@ -102,112 +146,227 @@ def build_blueprint(
         co_weights: Fraction per Course Outcome.
         unit_co_map: Mapping of unit -> list of allowed CO codes.
         seed: Random seed for deterministic allocation.
+        outcomes: Explicit list of CO codes or outcome dicts defining paper outcomes.
 
     Returns:
         dict with "slots", "report", and "warnings".
     """
     # 1. Determine preset and base parameters
-    selected_preset_key = None
-    if preset is not None:
-        selected_preset_key = preset
-    elif total_marks == 100:
-        selected_preset_key = 100
-    elif total_marks == 50:
-        selected_preset_key = 50
+    from paper_preset import PaperPreset
+
+    is_paper_preset = isinstance(preset, PaperPreset)
+    if is_paper_preset:
+        preset.validate()
+        num_units = len(preset.units)
+        unit_list = [u.unit for u in preset.units]
+        q_per_unit = max((len(u.options) for u in preset.units), default=2)
+        is_choice = True
+        expected_q_marks = preset.units[0].options[0].marks if preset.units and preset.units[0].options else 20
+        attempted_marks_pool = preset.attempt_marks
+        preset_config = {
+            "total_marks": preset.attempt_marks,
+            "units": num_units,
+            "questions_per_unit": q_per_unit,
+            "question_marks": expected_q_marks,
+            "is_choice": True,
+        }
     else:
-        selected_preset_key = 50
+        selected_preset_key = None
+        if preset is not None:
+            selected_preset_key = preset
+        elif total_marks == 100:
+            selected_preset_key = 100
+        elif total_marks == 50:
+            selected_preset_key = 50
+        else:
+            selected_preset_key = 50
 
-    preset_config = PRESETS.get(selected_preset_key, PRESETS[50])
+        preset_config = PRESETS.get(selected_preset_key, PRESETS[50])
 
-    num_units = units if isinstance(units, int) else (len(units) if isinstance(units, (list, tuple)) else preset_config["units"])
-    unit_list = list(range(1, num_units + 1)) if not isinstance(units, (list, tuple)) else list(units)
-    q_per_unit = questions_per_unit if questions_per_unit is not None else preset_config["questions_per_unit"]
-    is_choice = preset_config.get("is_choice", q_per_unit > 1)
+        num_units = units if isinstance(units, int) else (len(units) if isinstance(units, (list, tuple)) else preset_config["units"])
+        unit_list = list(range(1, num_units + 1)) if not isinstance(units, (list, tuple)) else list(units)
+        q_per_unit = questions_per_unit if questions_per_unit is not None else preset_config["questions_per_unit"]
+        is_choice = preset_config.get("is_choice", q_per_unit > 1)
 
-    expected_q_marks = preset_config["question_marks"]
-    if total_marks is not None and not is_choice:
-        expected_q_marks = total_marks // (num_units * q_per_unit)
-    elif total_marks is not None and is_choice:
-        expected_q_marks = total_marks // num_units
+        expected_q_marks = preset_config["question_marks"]
+        if total_marks is not None and not is_choice:
+            expected_q_marks = total_marks // (num_units * q_per_unit)
+        elif total_marks is not None and is_choice:
+            expected_q_marks = total_marks // num_units
 
-    # Attempted marks pool
-    attempted_marks_pool = total_marks if total_marks is not None else (num_units * expected_q_marks)
+        # Attempted marks pool
+        attempted_marks_pool = total_marks if total_marks is not None else (num_units * expected_q_marks)
+
+
+    warnings: list[str] = []
 
     # 2. Setup COs and Weights
-    if unit_co_map:
+    # Derive all_cos from a SINGLE source of truth
+    raw_codes = None
+    if outcomes is not None:
+        if isinstance(outcomes, dict):
+            raw_codes = list(outcomes.keys())
+        elif isinstance(outcomes, (list, tuple, set)):
+            raw_codes = []
+            for item in outcomes:
+                if isinstance(item, dict) and "code" in item:
+                    raw_codes.append(item["code"])
+                else:
+                    raw_codes.append(item)
+        else:
+            raw_codes = [outcomes]
+    elif co_weights is not None:
+        raw_codes = list(co_weights.keys())
+
+    if raw_codes is not None:
         all_cos: list[str] = []
-        for cos in unit_co_map.values():
-            for c in cos:
-                if c not in all_cos:
-                    all_cos.append(c)
+        seen_cos = set()
+        for c in raw_codes:
+            code = str(c).strip()
+            if code and code not in seen_cos:
+                seen_cos.add(code)
+                all_cos.append(code)
     else:
-        all_cos = [f"CO{u}" for u in range(1, num_units + 1)]
+        default_count = min(max(num_units, config.MIN_COS), config.MAX_COS)
+        all_cos = [f"CO{u}" for u in range(1, default_count + 1)]
+
+    # Validate outcome count
+    n_cos = len(all_cos)
+    if n_cos < config.MIN_COS:
+        raise ValueError(f"Add at least {config.MIN_COS} course outcomes (you have {n_cos})")
+    if n_cos > config.MAX_COS:
+        raise ValueError(f"A paper can have at most {config.MAX_COS} course outcomes (you have {n_cos})")
+
+    # Clean unit_co_map: if it references a code that does not exist, drop it with a warning
+    cleaned_unit_co_map: Optional[dict[Any, list[str]]] = None
+    if unit_co_map:
+        cleaned_unit_co_map = {}
+        for u_key, co_list in unit_co_map.items():
+            valid_list = []
+            for c in co_list:
+                c_str = str(c).strip()
+                if c_str in all_cos:
+                    valid_list.append(c_str)
+                else:
+                    warnings.append(
+                        f"Unit {u_key} references nonexistent course outcome '{c}', dropped."
+                    )
+            cleaned_unit_co_map[u_key] = valid_list
+
+    # Build eff_co_weights over exactly all_cos
+    if co_weights is not None:
+        for k in co_weights.keys():
+            k_str = str(k).strip()
+            if k_str not in all_cos:
+                warnings.append(
+                    f"Ignored weight for outcome '{k}' in co_weights not present in paper outcomes."
+                )
+
+        present_cos = [c for c in all_cos if c in co_weights]
+        missing_cos = [c for c in all_cos if c not in co_weights]
+
+        raw_co_weights: dict[str, float] = {}
+        for c in present_cos:
+            raw_co_weights[c] = float(co_weights[c])
+
+        if missing_cos:
+            present_sum = sum(raw_co_weights.values())
+            if 0 < present_sum < 1.0 - 1e-6:
+                rem_weight = 1.0 - present_sum
+                share = rem_weight / len(missing_cos)
+            else:
+                share = (present_sum / len(present_cos)) if present_cos and present_sum > 0 else (1.0 / len(all_cos))
+            for c in missing_cos:
+                raw_co_weights[c] = share
+
+        tot_co_weight = sum(raw_co_weights.values())
+        if tot_co_weight > 0:
+            eff_co_weights = {c: raw_co_weights[c] / tot_co_weight for c in all_cos}
+        else:
+            equal_share = 1.0 / len(all_cos)
+            eff_co_weights = {c: equal_share for c in all_cos}
+    else:
+        equal_share = 1.0 / len(all_cos)
+        eff_co_weights = {c: equal_share for c in all_cos}
 
     eff_bt_weights = dict(bt_weights) if bt_weights is not None else dict(DEFAULT_BT_WEIGHTS)
-    if co_weights is not None:
-        eff_co_weights = dict(co_weights)
-    else:
-        co_share = 1.0 / len(all_cos) if all_cos else 1.0
-        eff_co_weights = {co: co_share for co in all_cos}
 
     # Validate weights
     ok, weight_warnings = validate_weights({"bt": eff_bt_weights, "co": eff_co_weights})
     if not ok:
         raise ValueError(f"Invalid weights: {weight_warnings}")
 
-    warnings: list[str] = list(weight_warnings)
+    warnings.extend(weight_warnings)
+
 
     # 3. Determine structure and marks for every question
     # Questions are ordered by question_no = 1, 2, ...
     question_specs: list[dict[str, Any]] = []
     q_no = 1
     for u_idx, u_val in enumerate(unit_list):
+        u_plan = preset.units[u_idx] if is_paper_preset and u_idx < len(preset.units) else None
         for q_in_u in range(q_per_unit):
-            # Check explicit sub_question_marks
-            q_sub_marks = None
-            if sub_question_marks is not None:
-                if isinstance(sub_question_marks, list):
-                    if sub_question_marks and isinstance(sub_question_marks[0], list):
-                        # List of lists per question
-                        if q_no - 1 < len(sub_question_marks):
-                            q_sub_marks = list(sub_question_marks[q_no - 1])
-                    else:
-                        # Single list applied to all questions
-                        q_sub_marks = list(sub_question_marks)
-                elif isinstance(sub_question_marks, dict):
-                    if q_no in sub_question_marks:
-                        q_sub_marks = list(sub_question_marks[q_no])
-                    elif u_val in sub_question_marks:
-                        q_sub_marks = list(sub_question_marks[u_val])
+            q_plan = u_plan.options[q_in_u] if u_plan and q_in_u < len(u_plan.options) else None
 
-            # If not explicitly given, check sub_question_counts or preset defaults
-            if q_sub_marks is None:
-                sq_count = None
-                if sub_question_counts is not None:
-                    if isinstance(sub_question_counts, int):
-                        sq_count = sub_question_counts
-                    elif isinstance(sub_question_counts, list) and q_no - 1 < len(sub_question_counts):
-                        sq_count = sub_question_counts[q_no - 1]
-                    elif isinstance(sub_question_counts, dict):
-                        sq_count = sub_question_counts.get(q_no, sub_question_counts.get(u_val))
-                elif "sub_question_marks" in preset_config and q_no in preset_config["sub_question_marks"]:
-                    q_sub_marks = list(preset_config["sub_question_marks"][q_no])
-                elif "sub_question_counts" in preset_config:
-                    cfg_sq = preset_config["sub_question_counts"]
-                    if isinstance(cfg_sq, dict):
-                        sq_count = cfg_sq.get(q_no, 1)
-                    else:
-                        sq_count = cfg_sq
+            if q_plan is not None:
+                q_expected_marks = q_plan.marks
+                if q_plan.sub_marks:
+                    q_sub_marks = list(q_plan.sub_marks)
+                else:
+                    q_sub_marks = [q_expected_marks]
+            else:
+                q_expected_marks = expected_q_marks
+                # Check explicit sub_question_marks
+                q_sub_marks = None
+                if sub_question_marks is not None:
+                    if isinstance(sub_question_marks, list):
+                        if sub_question_marks and isinstance(sub_question_marks[0], list):
+                            # List of lists per question
+                            if q_no - 1 < len(sub_question_marks):
+                                val = sub_question_marks[q_no - 1]
+                                q_sub_marks = list(val) if val else [q_expected_marks]
+                        else:
+                            # Single list applied to all questions
+                            q_sub_marks = list(sub_question_marks) if sub_question_marks else [q_expected_marks]
+                    elif isinstance(sub_question_marks, dict):
+                        if q_no in sub_question_marks:
+                            val = sub_question_marks[q_no]
+                            q_sub_marks = list(val) if val else [q_expected_marks]
+                        elif u_val in sub_question_marks:
+                            val = sub_question_marks[u_val]
+                            q_sub_marks = list(val) if val else [q_expected_marks]
 
+                # If not explicitly given, check sub_question_counts or preset defaults
                 if q_sub_marks is None:
-                    count_to_use = sq_count if sq_count is not None else 1
-                    q_sub_marks = _split_marks(expected_q_marks, count_to_use)
+                    sq_count = None
+                    if sub_question_counts is not None:
+                        if isinstance(sub_question_counts, int):
+                            sq_count = sub_question_counts
+                        elif isinstance(sub_question_counts, list) and q_no - 1 < len(sub_question_counts):
+                            sq_count = sub_question_counts[q_no - 1]
+                        elif isinstance(sub_question_counts, dict):
+                            sq_count = sub_question_counts.get(q_no, sub_question_counts.get(u_val))
+                    elif "sub_question_marks" in preset_config and q_no in preset_config["sub_question_marks"]:
+                        q_sub_marks = list(preset_config["sub_question_marks"][q_no])
+                    elif "sub_question_counts" in preset_config:
+                        cfg_sq = preset_config["sub_question_counts"]
+                        if isinstance(cfg_sq, dict):
+                            sq_count = cfg_sq.get(q_no, 1)
+                        else:
+                            sq_count = cfg_sq
+
+                    if q_sub_marks is None:
+                        count_to_use = sq_count if sq_count is not None else 1
+                        if count_to_use <= 0:
+                            q_sub_marks = [q_expected_marks]
+                        else:
+                            q_sub_marks = _split_marks(q_expected_marks, count_to_use)
 
             # Validate that sub-question marks sum to the question's expected marks
-            if sum(q_sub_marks) != expected_q_marks:
+            if sum(q_sub_marks) != q_expected_marks:
                 raise ValueError(
                     f"Sub-question marks {q_sub_marks} for question {q_no} sum to {sum(q_sub_marks)}, "
-                    f"expected exactly {expected_q_marks} marks."
+                    f"expected exactly {q_expected_marks} marks."
                 )
 
             alt_grp = f"U{u_val}" if is_choice else None
@@ -219,7 +378,7 @@ def build_blueprint(
                 "question_no": q_no,
                 "question_in_unit": q_in_u,
                 "is_primary": is_primary,
-                "marks": expected_q_marks,
+                "marks": q_expected_marks,
                 "sub_marks": q_sub_marks,
                 "alternative_group": alt_grp,
             })
@@ -278,8 +437,8 @@ def build_blueprint(
         s["_band"] = best_band
 
         # Select CO
-        if unit_co_map and u in unit_co_map and unit_co_map[u]:
-            candidate_cos = [c for c in unit_co_map[u] if c in all_cos] or unit_co_map[u]
+        if cleaned_unit_co_map and u in cleaned_unit_co_map and cleaned_unit_co_map[u]:
+            candidate_cos = cleaned_unit_co_map[u]
         else:
             candidate_cos = all_cos
 
@@ -363,10 +522,12 @@ def build_blueprint(
     for s in final_slots:
         by_q.setdefault(s["question_no"], []).append(s)
 
+    expected_marks_by_q = {q["question_no"]: q["marks"] for q in question_specs}
     for q_num, q_slots in by_q.items():
         q_sum = sum(s["marks"] for s in q_slots)
-        assert q_sum == expected_q_marks, (
-            f"Question {q_num} marks invariant violated: sum {q_sum} != {expected_q_marks}"
+        exp_m = expected_marks_by_q.get(q_num, expected_q_marks)
+        assert q_sum == exp_m, (
+            f"Question {q_num} marks invariant violated: sum {q_sum} != {exp_m}"
         )
 
     # 7. Compute Report on Attempted Marks
@@ -432,7 +593,7 @@ def get_50_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
     Total = 50 marks.
     """
     if not cos:
-        cos = ["CO1", "CO2"]
+        cos = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
 
     num_cos = len(cos)
 
@@ -570,7 +731,7 @@ def get_50_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
 def get_25_mark_blueprint(cos: list[str] = None) -> list[dict[str, Any]]:
     """Return 25-mark internal assessment / quiz blueprint."""
     if not cos:
-        cos = ["CO1", "CO2"]
+        cos = [f"CO{i}" for i in range(1, config.MIN_COS + 1)]
 
     num_cos = len(cos)
 
