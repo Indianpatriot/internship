@@ -15,6 +15,8 @@ MIN_CHUNK_WORDS = int(os.getenv("MIN_CHUNK_WORDS", "25"))
 MIN_CONTEXT_WORDS = 40      # chunks shorter than this are not used for questions
 MAX_CONTEXT_WORDS = 450     # context truncated to this before prompting
 ANSWER_MIN_SIMILARITY = float(os.getenv("ANSWER_MIN_SIMILARITY", "0.35"))
+QUESTION_NUM_PREDICT = int(os.getenv("QUESTION_NUM_PREDICT", "120"))
+GENERATE_QA_TOGETHER = os.getenv("GENERATE_QA_TOGETHER", "false").lower() in ("1", "true", "yes")
 
 # Quality & Validation Thresholds (Problems 2, 3, 5)
 MIN_PAGE_CONTENT_WORDS = int(os.getenv("MIN_PAGE_CONTENT_WORDS", "150"))  # exclude divider/thin pages

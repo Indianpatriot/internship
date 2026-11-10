@@ -11,7 +11,7 @@ The question MUST start with one of these verbs: {verbs}.
 Rules:
 - Use only technical facts present in the context. Do not use outside knowledge.
 - The question must be completely SELF-CONTAINED and answerable by a student who does NOT have the textbook or notes in front of them.
-- NEVER refer to "the context", "the provided context", "the passage", "the text", "the book", "the author", "the chapter", "Chapter", "Section", "Figure", "Table", "Listing", "the listing", "the example", "the technique", "this technique", "above", "below", or "provided".
+- NEVER refer to "in the context of", "the context", "the provided context", "the passage", "the text", "the book", "the author", "the chapter", "Chapter", "Section", "Figure", "Table", "Listing", "the listing", "the example", "the technique", "this technique", "above", "below", or "provided".
 - If the question involves code, a command, or a script, you MUST include the exact code or command inline in the question text. NEVER say "the code snippet", "the following code", "the describe method", or "the script" without writing it out inline.
 - For comparison/contrast questions, compare concepts from the same technical category, and never formulate circular questions (do not compare a thing with itself or its direct definition).
 - Do NOT use "Calculate" or "Compute" unless the context contains concrete numbers, formulas, or quantitative metrics.{used_topics_rule}

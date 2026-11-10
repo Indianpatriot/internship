@@ -181,6 +181,50 @@ def run_verification():
         ok_kd, kd_msg = validate_question_kd(q["question"], lvl, kd)
         assert ok_kd, f"KD mismatch in {q.get('id')}: {kd_msg}"
 
+    # -------------------------------------------------------------------------
+    # Paper 3: 100-mark choice paper with 5 units (200 offered marks, 26 slots)
+    # -------------------------------------------------------------------------
+    print("\n=== Step 4: Generating Paper 3 (100-Mark Choice Paper, 200 Offered Marks, 26 Slots) ===")
+    preset_100 = make_preset(
+        "Choice100",
+        units=5,
+        marks_per_unit=20,
+        options=2,
+        sub_marks={
+            1: [7, 7, 6],
+            2: [10, 10],
+            3: [7, 7, 6],
+            4: [10, 10],
+            5: [7, 7, 6],
+        },
+        has_choice=True,
+    )
+    bp_100 = build_blueprint(preset=preset_100, outcomes=list(outcomes.keys()), seed=42)
+    slots_100 = bp_100["slots"]
+    print(f"Blueprint slots built: {len(slots_100)} slots (Offered Marks: 200, Attempted: 100)")
+    assert len(slots_100) == 26
+
+    t_start = time.time()
+    paper_3 = generate_full_paper(
+        chunks=scored_chunks,
+        blueprint=bp_100,
+        outcomes=outcomes,
+        unit_sources=None,
+        client=client,
+        seed=42,
+        keep_placeholders=True,
+    )
+    duration_p3 = time.time() - t_start
+    print(f"Paper 3 (26 slots) generated in {duration_p3:.3f}s")
+
+    qs_3 = paper_3["questions"]
+    assert len(qs_3) == 26
+    summary_3 = summarize(qs_3, blueprint_slots=slots_100)
+    print(f"Paper 3 offered marks: {summary_3['offered_marks']} (expected 200), attempted: {summary_3['total_marks']} (expected 100)")
+    assert summary_3["offered_marks"] == 200
+    assert summary_3["total_marks"] == 100
+    print("Paper 3 checks PASSED!")
+
     # Verify covered chapters header
     header_str = format_covered_chapters_header(questions=qs_1)
     print(f"\nSample Covered Chapters Header:\n{header_str}")

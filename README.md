@@ -36,20 +36,29 @@ ollama pull llama3.1:8b      # or set OLLAMA_MODEL in config.py
 ```
 
 ### Parallel LLM Generation & Performance Configuration
-To maximize generation speed, question slots are generated concurrently using a `ThreadPoolExecutor`. To enable Ollama to process concurrent requests in parallel on your GPU/CPU:
+To maximize generation speed, question slots are generated concurrently using a `ThreadPoolExecutor` while overlapping background retrieval and validation with Ollama inference.
+
+#### Recommended Ollama Settings (for 4 GB VRAM / Laptop GPUs like RTX 3050):
+Because `llama3.1:8b` (~4.9 GB) exceeds 4 GB VRAM and must split layers across GPU and CPU, configure Ollama with memory-efficient flags before launching `ollama serve`:
 
 ```bash
-# Set Ollama server concurrency before starting (e.g. 4 parallel slots)
-export OLLAMA_NUM_PARALLEL=4
+# Recommended environment variables for 4 GB VRAM GPUs:
+export OLLAMA_FLASH_ATTENTION=1      # Enables Flash Attention to speed up prompt evaluation and save VRAM
+export OLLAMA_KV_CACHE_TYPE=q8_0     # Quantizes KV cache to 8-bit, fitting context into GPU memory
+export OLLAMA_NUM_PARALLEL=1         # CRITICAL on 4 GB VRAM: prevents KV-cache duplication that forces model layers to CPU
 ollama serve
 ```
 
+> **Note on Concurrency**: Setting `OLLAMA_NUM_PARALLEL > 1` on 4 GB VRAM duplicates the KV cache across parallel contexts, pushing layers from GPU to system RAM and making overall generation up to 2-3x slower. Keep `OLLAMA_NUM_PARALLEL=1` and let the app's `GENERATION_WORKERS=2` or `3` pipeline CPU tasks (retrieval, sentence grounding, and duplicate validation) seamlessly with LLM inference.
+
 Key performance configurations available via environment variables or `config.py`:
-- `GENERATION_WORKERS`: Concurrent worker threads for slot generation (default `3`).
-- `OLLAMA_KEEP_ALIVE`: Keep-alive duration to prevent model unloading from memory (default `"30m"`).
-- `OLLAMA_NUM_CTX`: Context window allocated per generation request (default `2048`).
+- `GENERATION_WORKERS`: Worker threads in the generation pool (default `3`).
+- `OLLAMA_KEEP_ALIVE`: Model residency duration to avoid reloads (default `"30m"`).
+- `OLLAMA_NUM_CTX`: Static context window matching Ollama server options (default `2048`).
+- `QUESTION_NUM_PREDICT`: Right-sized token cap for single-sentence questions (default `120`).
 - `ENABLE_GENERATION_CACHE`: In-memory & disk caching under `.cache/generation/` keyed by prompt hash (default `true`).
 - `EMBEDDING_BATCH_SIZE`: Batch size for SentenceTransformer embedding operations (default `32`).
+- `GENERATE_QA_TOGETHER`: Optional flag to combine question and answer generation into a single call (default `false`).
 
 
 ## CLI Usage

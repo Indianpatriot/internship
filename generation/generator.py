@@ -12,6 +12,7 @@ import random
 import re
 import threading
 from typing import Any, Optional
+import config
 
 from blooms.revised_taxonomy import normalize_knowledge_dimension
 from blooms.verb_bank import (
@@ -354,7 +355,7 @@ def generate_question(
     ok = False
 
     # Proportional token cap
-    num_predict = max(250, min(500, (marks or 5) * 40))
+    num_predict = getattr(config, "QUESTION_NUM_PREDICT", 120)
     client_model = getattr(client, "model", "llama3.1:8b")
 
     for attempts in range(1, max_retries + 1):
@@ -525,11 +526,11 @@ def generate_answer(
     demand_issue: Optional[str] = None
 
     if marks <= 5:
-        num_predict = 450
+        num_predict = 180
     elif marks <= 8:
-        num_predict = 750
+        num_predict = 320
     else:
-        num_predict = 1000
+        num_predict = 500
 
     client_model = getattr(client, "model", "llama3.1:8b")
 
@@ -603,33 +604,30 @@ def generate_answer(
             from retrieval.co_mapper import _m
             embedder = _m()
             if embedder is not None:
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", last_answer) if s.strip() and len(s.split()) >= 4]
                 try:
                     import numpy as np
-                    embs = embedder.encode([context, last_answer], normalize_embeddings=True)
-                    overall_sim = float(np.dot(embs[0], embs[1]))
+                    all_texts = [context, last_answer] + sentences
+                    all_embs = embedder.encode(all_texts, normalize_embeddings=True)
+                    chunk_emb = all_embs[0]
+                    ans_emb = all_embs[1]
+                    overall_sim = float(np.dot(chunk_emb, ans_emb))
                     if overall_sim < ANSWER_MIN_SIMILARITY:
                         reason = f"similarity {overall_sim:.2f} below threshold {ANSWER_MIN_SIMILARITY}"
                         continue
-                except Exception:
-                    pass
 
-                # Sentence-level grounding check (Problem 5.1)
-                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", last_answer) if s.strip() and len(s.split()) >= 4]
-                if sentences:
-                    try:
-                        import numpy as np
-                        chunk_emb = embedder.encode([context], normalize_embeddings=True)[0]
-                        sent_embs = embedder.encode(sentences, normalize_embeddings=True)
-                        for s_txt, s_emb in zip(sentences, sent_embs):
-                            cos_sim = float(np.dot(chunk_emb, s_emb))
-                            if cos_sim < ANSWER_GROUNDING_SENTENCE_SIMILARITY:
+                    if sentences:
+                        sent_embs = all_embs[2:]
+                        cos_sims = np.dot(sent_embs, chunk_emb)
+                        for s_txt, cos_sim in zip(sentences, cos_sims):
+                            if float(cos_sim) < ANSWER_GROUNDING_SENTENCE_SIMILARITY:
                                 ungrounded_sentences.append(s_txt)
                         ungrounded_ratio = len(ungrounded_sentences) / len(sentences)
                         if ungrounded_ratio > ANSWER_MAX_UNGROUNDED_SENTENCE_RATIO and attempt < max_retries:
                             reason = f"ungrounded sentences ({len(ungrounded_sentences)}/{len(sentences)})"
                             continue
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
         ok = True
         reason = "ok"
@@ -1193,16 +1191,37 @@ def generate_paper_by_slots(
                     f"duplicate question: cosine similarity {sim:.2f} >= {QUESTION_SIMILARITY_DUPLICATE_THRESHOLD} with {questions[orig_i].get('id', 'earlier slot')}"
                 )
 
-        # 2. CO similarity check (Problem 3.2)
+        # 2. CO similarity check (Problem 3.2) - Vectorized & Batched
         if outcome_descs and embedder is not None:
-            for q_rec in questions:
-                co_code = q_rec.get("co")
-                co_desc = outcome_descs.get(co_code)
-                if co_desc and not q_rec.get("needs_review") and q_rec.get("valid", True):
-                    co_ok, sim_val = check_question_co_similarity(q_rec.get("question", ""), co_desc, embedder)
-                    if not co_ok:
-                        q_rec["needs_review"] = True
-                        q_rec.setdefault("review_flags", []).append(f"CO mismatch - review (similarity {sim_val:.2f} < {CO_SIMILARITY_THRESHOLD})")
+            candidate_qs = [
+                (idx, q_rec, q_rec.get("co"), outcome_descs.get(q_rec.get("co")))
+                for idx, q_rec in enumerate(questions)
+                if q_rec.get("co") and outcome_descs.get(q_rec.get("co"))
+                and not q_rec.get("needs_review") and q_rec.get("valid", True)
+            ]
+            if candidate_qs:
+                try:
+                    import numpy as np
+                    unique_cos = list({co_code: co_desc for _, _, co_code, co_desc in candidate_qs}.items())
+                    co_keys = [c[0] for c in unique_cos]
+                    co_texts = [c[1] for c in unique_cos]
+                    q_texts = [c[1].get("question", "") for c in candidate_qs]
+
+                    all_encoded = embedder.encode(co_texts + q_texts, normalize_embeddings=True)
+                    co_embs_map = {co_keys[k]: all_encoded[k] for k in range(len(co_keys))}
+                    q_embs = all_encoded[len(co_keys):]
+
+                    for k, (orig_idx, q_rec, co_code, _) in enumerate(candidate_qs):
+                        co_vec = co_embs_map.get(co_code)
+                        if co_vec is not None:
+                            sim_val = float(np.dot(q_embs[k], co_vec))
+                            if sim_val < CO_SIMILARITY_THRESHOLD:
+                                q_rec["needs_review"] = True
+                                q_rec.setdefault("review_flags", []).append(
+                                    f"CO mismatch - review (similarity {sim_val:.2f} < {CO_SIMILARITY_THRESHOLD})"
+                                )
+                except Exception:
+                    pass
 
         # 3. Consistency across paper (Problem 5.6)
         inconsistencies = check_paper_identifier_consistency(questions)

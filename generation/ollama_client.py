@@ -25,6 +25,8 @@ class OllamaClient:
         self.model, self.host = model, host.rstrip("/")
         self.temperature, self.timeout, self.retries = temperature, timeout, retries
         self.keep_alive = keep_alive
+        self.last_metadata: dict = {}
+        self.call_history: list[dict] = []
         self.session = requests.Session()
         adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
         self.session.mount("http://", adapter)
@@ -71,6 +73,22 @@ class OllamaClient:
                 r.raise_for_status()
                 data = r.json()
                 resp = data.get("response", "")
+                meta = {
+                    "load_duration": data.get("load_duration", 0),
+                    "prompt_eval_count": data.get("prompt_eval_count", 0),
+                    "prompt_eval_duration": data.get("prompt_eval_duration", 0),
+                    "eval_count": data.get("eval_count", 0),
+                    "eval_duration": data.get("eval_duration", 0),
+                    "total_duration": data.get("total_duration", 0),
+                    "done_reason": data.get("done_reason", ""),
+                }
+                if meta["eval_duration"] and meta["eval_count"]:
+                    meta["tokens_per_second"] = meta["eval_count"] / (meta["eval_duration"] / 1e9)
+                else:
+                    meta["tokens_per_second"] = 0.0
+                self.last_metadata = meta
+                self.call_history.append(meta)
+
                 if data.get("done_reason") == "length" and attempt < self.retries - 1:
                     current_num_predict = int(current_num_predict * 1.5)
                     continue
