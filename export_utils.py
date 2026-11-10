@@ -30,15 +30,18 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from ingestion.heading_detect import is_non_content_title
+
 
 HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8,64}[_\s\-]+", re.I)
 
 
 def clean_book_name(name: str) -> str:
-    """Strip any leading hex hash (8-64 chars) and clean up book titles."""
+    """Strip any leading hex hash (8-64 chars), extensions, and clean up book titles."""
     if not name or str(name).strip().lower() in ("none", "null", "undefined"):
         return ""
     s = str(name).strip()
+    s = re.sub(r"\.pdf$", "", s, flags=re.IGNORECASE).strip()
     s = re.sub(r"^[•*–—\-]\s*", "", s).strip()
     s = re.sub(r"^[0-9a-fA-F]{8,64}\s*[:_\-\s]+", "", s).strip()
     s = re.sub(r"\b[0-9a-fA-F]{8,64}\b\s*[:_\-\s]*", "", s).strip()
@@ -84,7 +87,10 @@ def format_covered_chapters_header(
     # 1. From questions
     if questions:
         for q in questions:
-            b_title = q.get("book_title") or q.get("book_id") or ""
+            b_title = q.get("display_label") or q.get("book_title") or ""
+            if not b_title and q.get("book_id"):
+                from ingestion.library import display_name
+                b_title = display_name(q["book_id"])
             ch = q.get("chapter") or ""
             if ch:
                 _add_entry(b_title, ch)
@@ -406,7 +412,12 @@ def create_docx_exam_paper(
 
         if has_source:
             ch = clean_book_name(q.get("chapter", ""))
-            b_title = clean_book_name(q.get("book_title", ""))
+            if is_non_content_title(ch):
+                ch = ""
+            b_title = clean_book_name(q.get("display_label") or q.get("book_title") or "")
+            if not b_title and q.get("book_id"):
+                from ingestion.library import display_name
+                b_title = display_name(q["book_id"])
             p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
             if b_title and ch.lower().startswith(b_title.lower()):
@@ -901,7 +912,12 @@ def create_pdf_exam_paper(
 
         if has_source:
             ch = clean_book_name(q.get("chapter", ""))
-            b_title = clean_book_name(q.get("book_title", ""))
+            if is_non_content_title(ch):
+                ch = ""
+            b_title = clean_book_name(q.get("display_label") or q.get("book_title") or "")
+            if not b_title and q.get("book_id"):
+                from ingestion.library import display_name
+                b_title = display_name(q["book_id"])
             p_s = q.get("page_start") or q.get("page", "")
             p_str = f"p.{p_s}" if p_s else ""
             if b_title and ch.lower().startswith(b_title.lower()):

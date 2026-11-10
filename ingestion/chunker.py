@@ -63,11 +63,12 @@ def build_chunks(lines, headings, max_words=MAX_CHUNK_WORDS,
             skip.update(range(h["line_idx"], h["last_idx"] + 1))
 
     # Identify chapter boundaries with start pages (using top-level headings)
-    min_lvl = min((h.get("level", 1) for h in clean_headings), default=1)
+    from ingestion.heading_detect import is_valid_chapter_title
+    min_lvl = min((h.get("level", 1) for h in clean_headings if is_valid_chapter_title(h.get("title", ""))), default=1)
     chap_starts = []
     seen_chap_pages = set()
     for h in clean_headings:
-        if h.get("level") == min_lvl:
+        if h.get("level") == min_lvl and is_valid_chapter_title(h.get("title", "")):
             p = h.get("page", 1)
             if p not in seen_chap_pages:
                 seen_chap_pages.add(p)
@@ -119,11 +120,14 @@ def build_chunks(lines, headings, max_words=MAX_CHUNK_WORDS,
     flush()
 
     # Filter out chunks that fell into non-content sections
+    # Non-chapter sub-sections (Summary, Questions, Exercises, Further reading) inherit the parent chapter's title as source.
     final_chunks = []
     for c in raw_chunks:
         ch = c.get("chapter", "")
         sec = c.get("section", "")
-        if is_non_content_title(ch) or is_non_content_title(sec):
+        if is_non_content_title(ch):
+            continue
+        if sec and any(clean_sec in sec.lower() for clean_sec in ("preface", "table of contents", "index", "dedication", "copyright", "about the author", "bibliography")):
             continue
         final_chunks.append(c)
 

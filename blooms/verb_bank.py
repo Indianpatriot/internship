@@ -79,31 +79,31 @@ def validate_question(question, level, min_words=5, max_words=80):
 # -----------------------------------------------------------------------------
 
 KD_BLOOM_VERBS: dict[tuple[str, str], list[str]] = {
-    # Factual Knowledge: basic elements, terminology, specific details
-    ("L1", "Factual"): ["name", "define", "list", "state", "identify", "recall", "label", "enumerate", "mention", "match", "select"],
-    ("L2", "Factual"): ["summarize", "describe", "paraphrase", "express", "outline"],
-    ("L3", "Factual"): ["respond", "show", "provide"],
+    # Factual Knowledge: basic elements, terminology, specific details (state, list, name, define, describe)
+    ("L1", "Factual"): ["name", "define", "list", "state", "identify", "recall", "label", "enumerate", "mention", "select"],
+    ("L2", "Factual"): ["describe", "summarize", "paraphrase", "clarify", "express", "explain"],
+    ("L3", "Factual"): ["show", "respond", "provide"],
     ("L4", "Factual"): ["categorize", "relate"],
     ("L5", "Factual"): ["check", "determine"],
     ("L6", "Factual"): ["generate", "assemble"],
 
-    # Conceptual Knowledge: interrelationships, classifications, models, theories
-    ("L1", "Conceptual"): ["recognize", "identify", "select", "match"],
-    ("L2", "Conceptual"): ["explain", "classify", "summarize", "describe", "discuss", "interpret", "paraphrase", "clarify"],
+    # Conceptual Knowledge: interrelationships, classifications, models, theories (explain, classify, compare)
+    ("L1", "Conceptual"): ["recognize", "match", "identify", "recall"],
+    ("L2", "Conceptual"): ["explain", "classify", "summarize", "interpret", "describe", "discuss", "clarify"],
     ("L3", "Conceptual"): ["illustrate", "demonstrate", "show", "apply"],
     ("L4", "Conceptual"): ["analyze", "distinguish", "contrast", "compare", "differentiate", "examine", "categorize", "relate"],
     ("L5", "Conceptual"): ["evaluate", "determine", "judge", "assess", "appraise"],
     ("L6", "Conceptual"): ["formulate", "synthesize", "propose", "construct", "design"],
 
-    # Procedural Knowledge: skills, algorithms, techniques, how-to methods
-    ("L1", "Procedural"): ["recall", "list", "state", "identify"],
-    ("L2", "Procedural"): ["outline", "clarify", "describe", "explain"],
+    # Procedural Knowledge: skills, algorithms, techniques, how-to methods (outline the steps, implement, apply)
+    ("L1", "Procedural"): ["recall", "list", "state", "identify", "enumerate"],
+    ("L2", "Procedural"): ["outline", "describe", "explain", "clarify"],
     ("L3", "Procedural"): ["demonstrate", "implement", "apply", "modify", "execute", "calculate", "compute", "solve", "use", "illustrate"],
-    ("L4", "Procedural"): ["integrate", "analyze", "deconstruct", "investigate"],
+    ("L4", "Procedural"): ["integrate", "deconstruct", "analyze", "differentiate"],
     ("L5", "Procedural"): ["validate", "assess", "check", "determine"],
     ("L6", "Procedural"): ["design", "construct", "develop", "plan", "compose", "devise"],
 
-    # Metacognitive Knowledge: strategic knowledge, cognitive tasks, reflection
+    # Metacognitive Knowledge: strategic knowledge, cognitive tasks, reflection (justify, recommend, reflect)
     ("L1", "Metacognitive"): ["identify", "recognize", "recall"],
     ("L2", "Metacognitive"): ["predict", "interpret", "clarify", "explain"],
     ("L3", "Metacognitive"): ["use", "apply", "demonstrate"],
@@ -200,3 +200,89 @@ def replace_question_verb(question: str, new_verb: str) -> str:
         remainder = rest[len(old_word):]
         return f"{prefix}{new_verb}{remainder}"
     return f"{prefix}{new_verb} {rest}"
+
+
+def correct_stem_verb_for_kd(question: str, level: str, kd: str) -> tuple[str, bool, str]:
+    """Check if the question's leading verb conforms to (level, kd).
+    If mismatched, replace with the appropriate allowed verb and adjust stem minimally.
+    Returns (rewritten_question, was_corrected, log_message).
+    """
+    if not question:
+        return question, False, ""
+
+    norm_lvl = normalize_level(level)
+    norm_kd = normalize_knowledge_dimension(kd)
+    fw = first_word(question).strip().lower()
+
+    # Check if already allowed
+    if is_verb_allowed_for_kd(fw, norm_lvl, norm_kd):
+        return question, False, ""
+
+    q = question.strip()
+
+    if norm_kd == "Factual":
+        if norm_lvl == "L1":
+            if re.match(r"^Describe\s+the\s+role\b", q, re.I):
+                new_q = re.sub(r"^Describe\s+the\s+role\b", "State the role", q, count=1, flags=re.I)
+                return new_q, True, "Factual correction: 'Describe the role' -> 'State the role'"
+            if re.match(r"^Outline\s+the\s+role\b", q, re.I):
+                new_q = re.sub(r"^Outline\s+the\s+role\b", "State the role", q, count=1, flags=re.I)
+                return new_q, True, "Factual correction: 'Outline the role' -> 'State the role'"
+            if fw in ("describe", "paraphrase", "explain", "discuss"):
+                new_q = replace_question_verb(q, "State")
+                return new_q, True, f"Factual correction: '{fw.capitalize()}' -> 'State'"
+            if fw in ("outline", "summarize"):
+                new_q = replace_question_verb(q, "List")
+                return new_q, True, f"Factual correction: '{fw.capitalize()}' -> 'List'"
+            cand = "State"
+            new_q = replace_question_verb(q, cand)
+            return new_q, True, f"Factual correction: '{fw.capitalize()}' -> '{cand}'"
+        else:
+            cand = nearest_valid_kd_verb(fw, norm_lvl, norm_kd)
+            new_q = replace_question_verb(q, cand)
+            return new_q, True, f"Factual correction: '{fw.capitalize()}' -> '{cand}'"
+
+    elif norm_kd == "Conceptual":
+        if re.match(r"^Identify\s+the\s+term\b", q, re.I):
+            cand_verb = "Explain the concept of" if norm_lvl == "L2" else nearest_valid_kd_verb("explain", norm_lvl, norm_kd)
+            new_q = re.sub(r"^Identify\s+the\s+term\s+for\b", f"{cand_verb} of" if "concept of" in cand_verb else cand_verb, q, count=1, flags=re.I)
+            if new_q == q:
+                new_q = re.sub(r"^Identify\s+the\s+term\b", cand_verb, q, count=1, flags=re.I)
+            return new_q, True, f"Conceptual correction: 'Identify the term' -> '{cand_verb}'"
+        if re.match(r"^Recognize\s+the\s+term\b", q, re.I):
+            cand_verb = "Explain the concept of" if norm_lvl == "L2" else nearest_valid_kd_verb("explain", norm_lvl, norm_kd)
+            new_q = re.sub(r"^Recognize\s+the\s+term\s+for\b", f"{cand_verb} of" if "concept of" in cand_verb else cand_verb, q, count=1, flags=re.I)
+            if new_q == q:
+                new_q = re.sub(r"^Recognize\s+the\s+term\b", cand_verb, q, count=1, flags=re.I)
+            return new_q, True, f"Conceptual correction: 'Recognize the term' -> '{cand_verb}'"
+        cand = nearest_valid_kd_verb(fw, norm_lvl, norm_kd)
+        new_q = replace_question_verb(q, cand)
+        return new_q, True, f"Conceptual correction: '{fw.capitalize()}' -> '{cand}'"
+
+    elif norm_kd == "Procedural":
+        if fw in ("analyze", "investigate"):
+            if norm_lvl == "L2":
+                m = re.match(r"^(?:Analyze|Investigate)\s+(?:the\s+process\s+of|the\s+steps\s+to|how\s+to)?\s*(.*)", q, re.I)
+                rest_text = m.group(1) if m else q[len(fw):].strip()
+                if rest_text.lower().startswith("the steps"):
+                    new_q = f"Outline {rest_text}"
+                else:
+                    new_q = f"Outline the steps to {rest_text}"
+                if not new_q.endswith("?"):
+                    new_q = new_q.rstrip(".!") + "?"
+                return new_q, True, f"Procedural correction: '{fw.capitalize()}' -> 'Outline the steps to'"
+            else:
+                cand = nearest_valid_kd_verb(fw, norm_lvl, norm_kd)
+                new_q = replace_question_verb(q, cand)
+                return new_q, True, f"Procedural correction: '{fw.capitalize()}' -> '{cand}'"
+        cand = nearest_valid_kd_verb(fw, norm_lvl, norm_kd)
+        new_q = replace_question_verb(q, cand)
+        return new_q, True, f"Procedural correction: '{fw.capitalize()}' -> '{cand}'"
+
+    elif norm_kd == "Metacognitive":
+        cand = nearest_valid_kd_verb(fw, norm_lvl, norm_kd)
+        new_q = replace_question_verb(q, cand)
+        return new_q, True, f"Metacognitive correction: '{fw.capitalize()}' -> '{cand}'"
+
+    return question, False, ""
+

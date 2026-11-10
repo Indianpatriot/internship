@@ -11,7 +11,7 @@ NON_CONTENT_TITLES = {
     "acknowledgment", "acknowledgments", "table of contents", "contents",
     "brief contents", "list of figures", "list of tables", "list of illustrations",
     "index", "subject index", "author index", "general index", "bibliography",
-    "references", "suggested readings", "further readings", "glossary",
+    "references", "suggested readings", "further readings", "further reading", "glossary",
     "dedication", "dedicated to", "copyright", "all rights reserved",
     "about the author", "about the authors", "about the technical editor",
     "about the technical editors", "about the reviewer", "about the reviewers",
@@ -19,6 +19,8 @@ NON_CONTENT_TITLES = {
     "about the cover illustration", "welcome", "to get the most out of this book",
     "conventions used", "get in touch", "reviews", "other books you may enjoy",
     "assessments", "answers", "answers to exercises", "answers to problems",
+    "summary", "questions", "exercises", "review questions", "key points", "conclusion",
+    "technical requirements", "check your understanding",
     "appendix", "appendices", "title page", "half title",
     "roadmap", "about the code", "about packt", "author online", "book forum",
     "other online resources", "back cover", "endpapers", "getting help",
@@ -58,6 +60,15 @@ NON_CONTENT_PATTERNS = [
     r"\bother\s+books\s+you\s+may\s+enjoy\b",
     r"\bassessments?\b",
     r"\banswers?\b",
+    r"\bquestions\b",
+    r"\bsummary\b",
+    r"\bexercises\b",
+    r"\breview\s+questions\b",
+    r"\bkey\s+points\b",
+    r"\bconclusions?\b",
+    r"\btechnical\s+requirements\b",
+    r"\bcheck\s+your\s+understanding\b",
+    r"^technique\s+\d+",
     r"\banswers\s+to\s+(?:exercises|problems)\b",
     r"\bindex\b",
     r"\bbibliograph(?:y|ies)\b",
@@ -111,11 +122,33 @@ def is_non_content_title(t: str) -> bool:
         "preface", "foreword", "acknowledgement", "acknowledgment",
         "table of contents", "contents", "index", "bibliography",
         "references", "glossary", "dedication", "copyright",
-        "about this book", "about the cover"
+        "about this book", "about the cover", "questions", "summary"
     ):
         if clean_t == nc or clean_t.startswith(nc + " ") or clean_t.endswith(" " + nc):
             return True
     return False
+
+
+def is_valid_chapter_title(t: str) -> bool:
+    """Check if title is a valid top-level chapter (not a section, sub-heading, or non-content)."""
+    if not t:
+        return False
+    norm = normalize_chapter_title(t)
+    if is_non_content_title(norm):
+        return False
+    # Technique N headings are sub-headings, not chapters
+    if re.match(r"^technique\s+\d+", norm, re.I):
+        return False
+    # Sub-heading numbering like "9.3", "1.2.3" are sections, not chapters
+    if re.match(r"^\d+\.\d+", norm):
+        return False
+    # Pure part / section headers without chapter
+    if re.match(r"^(?:part|section)\s+\d+", norm, re.I) and not re.search(r"\bchapter\b", norm, re.I):
+        return False
+    # Single letter headings like "A", "Z" (Index entries)
+    if len(re.sub(r"[^a-zA-Z]", "", norm)) <= 1:
+        return False
+    return True
 
 
 def body_size(lines) -> float:
@@ -249,25 +282,25 @@ def _toc_headings(lines, toc):
 def _detect_layer_1_outline(lines, toc, n_pages=None):
     if not toc or len(toc) < 2:
         return None
-    lvl1 = [e for e in toc if len(e) >= 3 and e[0] == 1 and not is_non_content_title(e[1])]
-    lvl2 = [e for e in toc if len(e) >= 3 and e[0] == 2 and not is_non_content_title(e[1])]
+    lvl1 = [e for e in toc if len(e) >= 3 and e[0] == 1 and is_valid_chapter_title(e[1])]
+    lvl2 = [e for e in toc if len(e) >= 3 and e[0] == 2 and is_valid_chapter_title(e[1])]
 
-    is_lvl1_parts = lvl1 and any(re.match(r"^(?:part|section)\b", e[1].strip(), re.I) for e in lvl1)
-    if is_lvl1_parts and len(lvl2) >= 2:
-        target_toc = lvl2
-    elif len(lvl1) >= 2:
-        has_chapters = any(re.match(r"^(?:chapter\b|\d+[\.:\s])", e[1].strip(), re.I) for e in lvl1)
-        if has_chapters:
-            target_toc = [e for e in lvl1 if not re.match(r"^(?:part|section)\s+\d+", e[1].strip(), re.I)]
-        else:
-            target_toc = lvl1
-    elif len(lvl2) >= 2:
-        target_toc = lvl2
+    has_lvl1_chapters = any(re.match(r"^(?:chapter\b|\d+[\.:\s])", e[1].strip(), re.I) for e in lvl1)
+    if has_lvl1_chapters:
+        target_toc = [e for e in lvl1 if is_valid_chapter_title(e[1])]
     else:
-        target_toc = [e for e in toc if len(e) >= 3 and not is_non_content_title(e[1])]
+        is_lvl1_parts = lvl1 and all(re.match(r"^(?:part|section)\b", e[1].strip(), re.I) for e in lvl1)
+        if (is_lvl1_parts or len(lvl1) < 2) and len(lvl2) >= 2:
+            target_toc = [e for e in lvl2 if is_valid_chapter_title(e[1])]
+        elif len(lvl1) >= 2:
+            target_toc = [e for e in lvl1 if is_valid_chapter_title(e[1])]
+        elif len(lvl2) >= 2:
+            target_toc = [e for e in lvl2 if is_valid_chapter_title(e[1])]
+        else:
+            target_toc = [e for e in toc if len(e) >= 3 and is_valid_chapter_title(e[1])]
 
     found = _toc_headings(lines, target_toc)
-    clean_found = [h for h in found if not is_non_content_title(h["title"])]
+    clean_found = [h for h in found if is_valid_chapter_title(h["title"])]
 
     # If real chapters exist, drop pure Part / Section groupings
     has_real_chaps = any(
@@ -287,7 +320,7 @@ def _detect_layer_1_outline(lines, toc, n_pages=None):
     )
     if only_parts and target_toc != lvl2 and len(lvl2) >= 2:
         found2 = _toc_headings(lines, lvl2)
-        clean2 = [h for h in found2 if not is_non_content_title(h["title"])]
+        clean2 = [h for h in found2 if is_valid_chapter_title(h["title"])]
         if validate_headings_list(clean2, n_pages):
             for h in clean2:
                 h["method"] = "pdf_outline"

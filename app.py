@@ -1065,13 +1065,16 @@ if uploaded_pdfs:
     raw_chunks = library.get("chunks", [])
     books = library.get("books", {})
 
-    if len(uploaded_pdfs) == 1:
-        single_binfo = list(books.values())[0] if books else None
-        title_cand = single_binfo.get("title", titles[0]) if single_binfo else titles[0]
-        st.session_state.course_title = clean_book_name(title_cand)
-    else:
-        book_titles = [clean_book_name(binfo.get("title", binfo.get("display_label", ""))) for binfo in books.values()]
-        st.session_state.course_title = " & ".join(book_titles[:2])
+    from ingestion.library import display_name
+    if "course_title" not in st.session_state or getattr(st.session_state, "_course_title_is_auto", True):
+        if len(uploaded_pdfs) == 1:
+            single_binfo = list(books.values())[0] if books else None
+            title_cand = single_binfo.get("title", titles[0]) if single_binfo else titles[0]
+            st.session_state.course_title = display_name(title_cand)
+        else:
+            book_titles = [display_name(binfo, order=i + 1) for i, binfo in enumerate(books.values())]
+            st.session_state.course_title = " & ".join([b for b in book_titles if b])
+        st.session_state._course_title_is_auto = True
 
     st.markdown(f"##### 📚 Uploaded Textbooks ({len(books)})")
     b_cols = st.columns(min(max(len(books), 1), 4))
@@ -1080,7 +1083,7 @@ if uploaded_pdfs:
             p_min, p_max = binfo.get("page_range", (1, 1))
             n_ch = len(binfo.get("chapters", []))
             st.metric(
-                label=binfo.get("display_label", binfo.get("title", bid)),
+                label=display_name(binfo, order=i + 1),
                 value=f"{binfo.get('n_chunks', 0)} chunks",
                 delta=f"{n_ch} chaps (pp. {p_min}–{p_max})",
                 delta_color="off",
@@ -1264,7 +1267,8 @@ if uploaded_pdfs:
                         b_chaps = binfo.get("chapters", [])
                         def_chaps = u_sources.get(bid) if isinstance(u_sources, dict) else None
                         valid_def = [c for c in def_chaps if c in b_chaps] if def_chaps else []
-                        book_lbl = binfo.get("display_label", binfo.get("title", bid))
+                        from ingestion.library import display_name
+                        book_lbl = display_name(binfo, order=b_idx + 1)
                         sel_for_b = st.multiselect(
                             f"{book_lbl}",
                             options=b_chaps,

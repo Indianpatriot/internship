@@ -169,6 +169,8 @@ class MockClient:
 
         concept = _extract_concept(ctx)
         selected_verb = verbs[0].strip()
+        if "multi-part recall" in prompt.lower():
+            return f"List and state the purpose of four core components and operational features of {concept}?"
         return _format_question_with_verb(selected_verb, concept)
 
     def _generate_answer(self, prompt: str) -> str:

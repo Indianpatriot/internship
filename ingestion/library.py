@@ -19,9 +19,69 @@ from ingestion.pipeline import ingest
 from retrieval.sources import select_chunks_for_unit
 
 CACHE_DIR = Path(".cache/ingestion")
-FILTER_VERSION = "pf_v6"
-DETECTION_VERSION = "hd_v3"
+FILTER_VERSION = "pf_v7"
+DETECTION_VERSION = "hd_v4"
 HEX_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8,64}[_-]+", re.I)
+
+
+def _title_case_clean(s: str) -> str:
+    minor = {"in", "of", "the", "and", "for", "on", "at", "to", "a", "an", "as", "by", "with"}
+    words = s.split()
+    if not words:
+        return s
+    res = [words[0] if words[0].isupper() else words[0].capitalize()]
+    for w in words[1:]:
+        lw = w.lower()
+        if lw == "devops":
+            res.append("DevOps")
+        elif lw in minor:
+            res.append(lw)
+        elif w.isupper():
+            res.append(w)
+        elif any(c.isupper() for c in w[1:]):
+            res.append(w)
+        else:
+            res.append(w.capitalize())
+    return " ".join(res)
+
+
+def display_name(book_info_or_obj: Any, order: Optional[int] = None) -> str:
+    """Format a clean display label: '1 Docker in Practice', '2 Kubernetes in Action', etc.
+    Never returns slugs or hex-prefixed names.
+    """
+    if isinstance(book_info_or_obj, dict):
+        disp = (
+            book_info_or_obj.get("display_label")
+            or book_info_or_obj.get("title")
+            or book_info_or_obj.get("book_title")
+            or book_info_or_obj.get("book_id")
+            or ""
+        )
+        ord_num = book_info_or_obj.get("order", order)
+    elif isinstance(book_info_or_obj, str):
+        disp = book_info_or_obj
+        ord_num = order
+    else:
+        disp = str(book_info_or_obj or "")
+        ord_num = order
+
+    from export_utils import clean_book_name
+    clean = clean_book_name(disp)
+    m = re.match(r"^(\d+)\s+(.*)$", clean)
+    if m:
+        pfx = m.group(1)
+        rest = m.group(2).replace("-", " ").replace("_", " ").strip()
+        rest = clean_book_name(rest)
+        rest = _title_case_clean(rest)
+        return f"{pfx} {rest}"
+
+    clean = clean.replace("-", " ").replace("_", " ").strip()
+    clean = clean_book_name(clean)
+    clean = _title_case_clean(clean)
+
+    if ord_num:
+        return f"{ord_num} {clean}"
+    return clean
 
 
 def _clean_stem(name: str) -> str:
@@ -173,20 +233,22 @@ def load_library(
 
         if titles and idx < len(titles):
             title = titles[idx]
-            display_label = titles[idx]
+            display_label = display_name(titles[idx], order=idx + 1)
         elif has_hex or numbered:
             title = f"{idx + 1} {clean_disp}"
-            display_label = f"{idx + 1} {clean_disp}"
+            display_label = display_name(clean_disp, order=idx + 1)
         else:
-            title = clean_disp.title() if clean_disp.islower() else clean_disp
-            display_label = f"{idx + 1} {clean_disp}"
+            clean_t = clean_disp.title() if clean_disp.islower() else clean_disp
+            title = clean_t
+            display_label = display_name(clean_t, order=idx + 1)
 
         chunks = add_book(str(path_obj), book_id=assigned_id, title=title, cache_dir=cache_dir)
         for c in chunks:
             c["display_label"] = display_label
+            c["book_title"] = title
 
         # Collect ordered unique chapters, normalized and deduplicated case-insensitively
-        from ingestion.heading_detect import is_non_content_title, normalize_chapter_title
+        from ingestion.heading_detect import is_valid_chapter_title, normalize_chapter_title
         ordered_chapters: list[str] = []
         seen_ch_lower: set[str] = set()
         det_method = "body_headings"
@@ -200,7 +262,7 @@ def load_library(
             if raw_ch:
                 norm_ch = normalize_chapter_title(raw_ch)
                 c["chapter"] = norm_ch
-                if norm_ch and not is_non_content_title(norm_ch):
+                if is_valid_chapter_title(norm_ch):
                     ch_lower = norm_ch.lower()
                     if ch_lower not in seen_ch_lower:
                         seen_ch_lower.add(ch_lower)

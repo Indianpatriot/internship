@@ -9,11 +9,13 @@ Using ONLY the context below, write exactly ONE high-quality, clear, sensible {n
 Assigned Knowledge Dimension: {kd_name}.
 The question MUST start with one of these verbs: {verbs}.
 Rules:
-- Use only technical facts present in the context. Do not use outside knowledge.
+- Use only technical facts present in the context. Do not use outside knowledge. Never accept or build upon false premises.
 - The question must be completely SELF-CONTAINED and answerable by a student who does NOT have the textbook or notes in front of them.
-- NEVER refer to "in the context of", "the context", "the provided context", "the passage", "the text", "the book", "the author", "the chapter", "Chapter", "Section", "Figure", "Table", "Listing", "the listing", "the example", "the technique", "this technique", "above", "below", or "provided".
+- NEVER refer to "in the context of", "the context", "the provided context", "the passage", "the text", "the book", "the author", "the chapter", "introductory chapter", "earlier chapter", "in this chapter", "in this book", "Chapter", "Section", "Figure", "Table", "Listing", "the listing", "the example", "the technique", "this technique", "above", "below", or "provided".
+- Explicitly name the technical subject, tool, or system. NEVER ask about "the tools", "the approach", "the technique", or "this method" without explicitly naming the technology or system.
 - If the question involves code, a command, or a script, you MUST include the exact code or command inline in the question text. NEVER say "the code snippet", "the following code", "the describe method", or "the script" without writing it out inline.
-- For comparison/contrast questions, compare concepts from the same technical category, and never formulate circular questions (do not compare a thing with itself or its direct definition).
+- For comparison/contrast questions, compare concepts from the same technical category that both appear in the context, and never formulate circular questions (do not compare a thing with itself or its direct definition).
+- For questions under 8 marks, do NOT ask "Which option would you choose and why?" or request choosing between alternatives. Limit demands to at most 2 items for 4-5 marks.
 - Do NOT use "Calculate" or "Compute" unless the context contains concrete numbers, formulas, or quantitative metrics.{used_topics_rule}
 - {hint}{kd_hint}{marks}
 - Output only the question text ending with '?'. No numbering, no preamble, no answer.
@@ -63,12 +65,16 @@ def build_prompt(
     if used_topics:
         used_topics_rule = f"\n- Avoid the following topics already tested in this exam unit: {', '.join(used_topics)}."
 
+    lvl_hint = LEVEL_HINTS[level]
+    if level == "L1" and marks and marks >= 8:
+        lvl_hint = " Require multi-part recall (e.g. 'List and state the purpose of four ...' or 'Name and describe five core components of ...'), NOT a single-word answer."
+
     return BASE.format(
         name=LEVEL_NAMES[level],
         level=level,
         kd_name=kd_name,
         verbs=", ".join(verbs),
-        hint=LEVEL_HINTS[level],
+        hint=lvl_hint,
         kd_hint=kd_hint,
         marks=MARKS_HINTS.get(marks, ""),
         used_topics_rule=used_topics_rule,
@@ -80,9 +86,10 @@ ANSWER_BASE = """You are an expert exam evaluator and question paper author.
 Provide an authoritative model answer for the exam question below using ONLY the provided context.
 
 Rules:
-- Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text.
+- Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text. State only verified facts from the context; a question's false premise must not be accepted.
+- For term recall questions (e.g. 'Identify the term...', 'Name the term...'), provide ONLY the short precise term/name (under 8 words) without repeating or echoing the question stem.
 {strict_rule}- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated"), and do not invent contradictory alternatives. Write the exact answer an examiner expects.
-- The model answer must be completely self-contained. NEVER write phrases such as "according to the provided context", "in the provided example", "as shown in Listing", "as described in the passage", or "the provided text".
+- The model answer must be completely self-contained. NEVER write phrases such as "according to the provided context", "in the provided example", "as shown in Listing", "as described in the passage", "introductory chapter", "earlier chapter", "in this chapter", "in this book", "the author", or local file paths (e.g. /home/..., C:\\Users\\...).
 - Address all parts of the question directly (such as trade-offs, advantages, consequences, steps, or justification).
 - Target answer length: approximately {target_words} words (appropriate for a {marks}-mark question).
 - If multiple valid approaches exist, label them clearly with "Alternative approach:". NEVER use "OR" or "― OR ―" inside the answer text.

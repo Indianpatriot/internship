@@ -34,15 +34,18 @@ def get_chapter_metadata(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not raw_chap or raw_chap == "Document" or is_non_content_title(raw_chap):
             continue
 
+        from ingestion.heading_detect import is_valid_chapter_title
         chap = normalize_chapter_title(raw_chap)
-        if not chap or is_non_content_title(chap):
+        if not chap or not is_valid_chapter_title(chap):
             continue
         c["chapter"] = chap
 
         p_start = c.get("page_start", 0)
         p_end = c.get("page_end", p_start)
         sec = c.get("section", "")
-        book_label = c.get("book_title") or c.get("display_label") or c.get("book_id") or ""
+        from ingestion.library import display_name
+        raw_b = c.get("display_label") or c.get("book_title") or c.get("book_id") or ""
+        book_label = display_name(raw_b)
 
         if multiple_books and book_label and not str(chap).startswith(f"{book_label} -"):
             display_chap = f"{book_label} - {chap}"

@@ -105,16 +105,34 @@ BANNED_ANSWER_PATTERNS = [
     r"\bdoes\s+not\s+provide\b",
     r"\bnot\s+specified\s+in\s+the\b",
     r"\blacks\s+information\b",
+    r"\b(?:the\s+)?(?:correct\s+)?(?:answer|option)\s+is\s+[a-d]\b",
+    r"\boption\s+[a-d]\s+is\s+correct\b",
+    r"^(?:the\s+)?answer:\s*[a-d]\b",
+    r"^(?:option\s+)?[a-d][\.\)]?$",
 ]
 BANNED_ANSWER_RE = re.compile("|".join(BANNED_ANSWER_PATTERNS), re.I)
 
+BANNED_LEAK_PATTERNS = [
+    r"\bintroductory\s+chapter\b",
+    r"\bearlier\s+chapter\b",
+    r"\bin\s+this\s+chapter\b",
+    r"\bin\s+this\s+book\b",
+    r"\bthe\s+author(?:s)?\b",
+    r"/home/[a-zA-Z0-9_\.\-]+/",
+    r"[A-Za-z]:\\(?:Users|Documents and Settings)\\[a-zA-Z0-9_\.\-\\]+",
+    r"/(?:Users|home)/[a-zA-Z0-9_\.\-]+",
+]
+BANNED_LEAK_RE = re.compile("|".join(BANNED_LEAK_PATTERNS), re.I)
+
 
 def has_unseen_material_reference(text: str, is_question: bool = True) -> tuple[bool, str]:
-    """Check for dependencies on unseen material (Problem 4).
+    """Check for dependencies on unseen material or textbook leaks (Problem 4 & Problem 6).
 
     Allows code/script references only if code is included inline in the question stem.
     """
     s = text or ""
+    if BANNED_LEAK_RE.search(s):
+        return True, "textbook leak or personal path reference"
     if is_question:
         # Check inline code
         has_inline_code = bool(re.search(r"`[^`]+`|```[\s\S]+?```", s))
@@ -155,7 +173,9 @@ def is_circular_question(q: str) -> bool:
 
 
 def check_compare_entities_in_context(q: str, context: str) -> bool:
-    """Problem 5.3: For compare/contrast/distinguish questions, both named entities must appear in chunk context."""
+    """Problem 5.3 & Problem 3.1: For compare/contrast/distinguish questions, both named entities
+    must be of the same category and both must appear in chunk context.
+    """
     fw = first_word(q)
     if fw in ("compare", "contrast", "differentiate", "distinguish"):
         m = re.search(
@@ -166,7 +186,7 @@ def check_compare_entities_in_context(q: str, context: str) -> bool:
         if m:
             e1 = m.group(1).strip().lower()
             e2 = m.group(2).strip().lower()
-            stop = {"the", "a", "an", "role", "of", "process", "concept", "approach"}
+            stop = {"the", "a", "an", "role", "of", "process", "concept", "approach", "task"}
             generic = {
                 "network", "networks", "system", "systems", "component", "components",
                 "method", "methods", "model", "models", "architecture", "architectures",
@@ -175,6 +195,24 @@ def check_compare_entities_in_context(q: str, context: str) -> bool:
             }
             e1_words = [w for w in e1.split() if w not in stop]
             e2_words = [w for w in e2.split() if w not in stop]
+
+            # Cross-category non-alternative checks (Problem 3.1)
+            e1_str = " ".join(e1_words)
+            e2_str = " ".join(e2_words)
+            is_pipeline_1 = bool(re.search(r"\b(?:continuous\s+delivery|ci/cd|pipeline|delivery|integration)\b", e1_str))
+            is_network_2 = bool(re.search(r"\b(?:networking|network|ip|dns|port|overlay)\b", e2_str))
+            is_pipeline_2 = bool(re.search(r"\b(?:continuous\s+delivery|ci/cd|pipeline|delivery|integration)\b", e2_str))
+            is_network_1 = bool(re.search(r"\b(?:networking|network|ip|dns|port|overlay)\b", e1_str))
+            if (is_pipeline_1 and is_network_2) or (is_pipeline_2 and is_network_1):
+                return False
+
+            is_docker_task = bool(re.search(r"\b(?:docker\s+build|build\s+and\s+push|container\s+build)\b", e1_str))
+            is_iac_task = bool(re.search(r"\b(?:terraform|installer|provisioning|packer)\b", e2_str))
+            is_docker_task_2 = bool(re.search(r"\b(?:docker\s+build|build\s+and\s+push|container\s+build)\b", e2_str))
+            is_iac_task_1 = bool(re.search(r"\b(?:terraform|installer|provisioning|packer)\b", e1_str))
+            if (is_docker_task and is_iac_task) or (is_docker_task_2 and is_iac_task_1):
+                return False
+
             e1_substantive = [w for w in e1_words if w not in generic]
             e2_substantive = [w for w in e2_words if w not in generic]
             e1_check = e1_substantive if e1_substantive else e1_words
@@ -184,6 +222,145 @@ def check_compare_entities_in_context(q: str, context: str) -> bool:
             has_e2 = all(w in ctx_lower for w in e2_check) if e2_check else True
             return has_e1 and has_e2
     return True
+
+
+UNDERSPECIFIED_STEM_PATTERNS = [
+    r"\bwhich\s+of\s+the\s+(?:two\s+)?(?:tools|options|approaches|methods)\b",
+    r"\bthe\s+two\s+(?:tools|options|approaches|methods)\b",
+    r"\bthe\s+(?:tools|approaches|options)\s+discussed\b",
+    r"\bthe\s+tools\s+that\s+will\s+be\s+used\b",
+    r"\bthe\s+tools\s+to\s+be\s+used\b",
+    r"\b(?:what\s+are|name|list|state|identify)\s+the\s+tools\b(?!\s+(?:in|of|for)\s+[A-Z])",
+    r"\b(?:the|this)\s+(?:approach|technique|method|process)\s+(?:used\s+to|for|in)\b(?!\s+[A-Z])",
+]
+UNDERSPECIFIED_STEM_RE = re.compile("|".join(UNDERSPECIFIED_STEM_PATTERNS), re.I)
+
+
+def is_underspecified_stem(q: str) -> bool:
+    """Problem 6.2: Reject stems referring to 'the tools' / 'the approach' without naming the referent."""
+    return bool(UNDERSPECIFIED_STEM_RE.search(q or ""))
+
+
+def check_l1_marks_demand(q: str, level: str, marks: Optional[int]) -> tuple[bool, str]:
+    """Problem 6.3: A slot with 8 or more marks at L1 must ask for a multi-part recall."""
+    if level == "L1" and marks and marks >= 8:
+        s = (q or "").lower()
+        has_compound_recall = bool(re.search(r"\b(?:list|identify|name|state|recognize|recall)\b.*\band\s+(?:state|describe|explain)\s+(?:the\s+)?(?:purpose|role|function|operation)", s))
+        has_large_count = bool(re.search(r"\b(?:four|five|six|seven|eight|multiple|several)\s+(?:[a-zA-Z-]+\s+)?(?:components|features|steps|types|categories|principles|properties|attributes|elements|factors|parts|phases|prerequisites|primitives)\b", s))
+        if not (has_compound_recall or has_large_count):
+            return False, "8+ mark L1 slot must ask for multi-part recall (e.g. four or more items, or list and state purpose/role), not a small single-item recall"
+    return True, "ok"
+
+
+def count_stem_demands(stem: str) -> int:
+    """Problem 3.2: Count demands in stem by verbs/clauses and conjunctions."""
+    s = (stem or "").strip()
+    demands = 1
+    demands += len(re.findall(
+        r"(?:,\s*(?:compare|contrast|describe|explain|define|state|outline|illustrate|provide|give|evaluate|justify)|and\s+(?:state|explain|describe|outline|identify|list|justify|compare|evaluate|illustrate|provide|give)|also|considering|justify\s+your\s+choice|which\s+(?:option\s+)?would\s+you\s+choose)",
+        s,
+        re.I
+    ))
+    demands += len(re.findall(r";\s*[A-Za-z]", s))
+    return demands
+
+
+def simplify_stem_demands(stem: str, marks: Optional[int]) -> str:
+    """Problem 3.2 & 3.3: Strip trailing 'Which option would you choose and why?' for <8 marks,
+    and enforce demand limits: 4-5 marks <= 2, 6-8 marks <= 3, 10+ <= 4.
+    """
+    if not stem:
+        return stem
+    q = stem.strip()
+    m_val = marks or 5
+
+    # 1. Strip trailing choice questions for < 8 marks
+    if m_val < 8:
+        q = re.sub(
+            r"[\s,\.]*\b(?:which\s+(?:option\s+)?would\s+you\s+(?:choose|prefer)(?:\s+and\s+why)?|which\s+(?:would\s+you|would\s+one)\s+(?:choose|prefer)(?:\s+and\s+why)?|justify\s+your\s+(?:choice|selection))\s*\?*$",
+            "?",
+            q,
+            flags=re.I
+        )
+
+    # 2. Limit demands
+    max_demands = 2 if m_val <= 5 else (3 if m_val <= 8 else 4)
+    for _ in range(5):
+        if count_stem_demands(q) <= max_demands:
+            break
+        trimmed = re.sub(
+            r"[\s,]+(?:and\s+)?(?:explain|give|illustrate|provide|describe|outline|state|justify|compare|contrast)[^,?.!]+(?:\?|\.)?$",
+            "?",
+            q,
+            flags=re.I
+        )
+        if trimmed != q and len(trimmed.split()) >= 4:
+            q = trimmed
+        else:
+            break
+
+    if not q.endswith("?"):
+        q = q.rstrip(".!,") + "?"
+    return q
+
+
+TERM_STEM_RE = re.compile(
+    r"\b(?:identify|recognize|name|recall)\s+(?:the\s+term|the\s+name|the\s+concept)\b|\bwhat\s+is\s+the\s+term\s+for\b",
+    re.I
+)
+
+
+def validate_term_answer(question: str, answer: str) -> tuple[bool, str]:
+    """Problem 2.1: 'Identify / Recognize / Name / Recall the term' answer must be under ~8 words
+    and not echo or repeat question wording.
+    """
+    if not TERM_STEM_RE.search(question or ""):
+        return True, "ok"
+
+    words = [w for w in re.split(r"\s+", answer.strip()) if w]
+    if len(words) > 8:
+        return False, f"term answer is too long ({len(words)} words > 8; expected short term)"
+
+    stop_words = {"what", "is", "the", "term", "for", "a", "an", "in", "of", "to", "that", "which", "and", "by", "or", "as"}
+    q_tokens = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", question) if w.lower() not in stop_words}
+    a_tokens = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", answer) if w.lower() not in stop_words}
+    if a_tokens and (len(a_tokens & q_tokens) / len(a_tokens)) >= 0.70:
+        return False, "term answer echoes or restates the question stem wording"
+    return True, "ok"
+
+
+def check_cross_slot_contradictions(questions: list[dict[str, Any]], embedder: Any = None) -> list[tuple[int, int, str]]:
+    """Problem 2.3: Compare statements about the same concept across slots; flag contradictions for review."""
+    contradictions = []
+    items = []
+    for idx, q in enumerate(questions):
+        ans = q.get("answer", "")
+        if ans and not ans.startswith("[NEEDS REVIEW"):
+            sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ans) if len(s.split()) >= 4]
+            items.append((idx, q, sents))
+
+    NEGATION_WORDS = {"not", "never", "no", "cannot", "neither", "nor", "fails", "without", "lost", "destroy"}
+    AFFIRMATION_WORDS = {"restarts", "retained", "survives", "preserves", "maintains", "handled", "recovers"}
+
+    for a_i in range(len(items)):
+        idx_a, q_a, sents_a = items[a_i]
+        for b_i in range(a_i + 1, len(items)):
+            idx_b, q_b, sents_b = items[b_i]
+            for sa in sents_a:
+                sa_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", sa.lower()))
+                for sb in sents_b:
+                    sb_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", sb.lower()))
+                    overlap = sa_words & sb_words
+                    if len(overlap) >= 3:
+                        neg_a = bool(overlap & NEGATION_WORDS or (sa_words & NEGATION_WORDS))
+                        neg_b = bool(overlap & NEGATION_WORDS or (sb_words & NEGATION_WORDS))
+                        aff_a = bool(sa_words & AFFIRMATION_WORDS)
+                        aff_b = bool(sb_words & AFFIRMATION_WORDS)
+                        if (neg_a and aff_b) or (neg_b and aff_a) or (neg_a != neg_b and len(overlap) >= 4):
+                            msg = f"potential cross-slot contradiction between {q_a.get('id', 'Slot')} and {q_b.get('id', 'Slot')}: '{sa[:50]}...' vs '{sb[:50]}...'"
+                            contradictions.append((idx_a, idx_b, msg))
+                            break
+    return contradictions
 
 
 DEMAND_KEYWORDS = {
@@ -414,19 +591,50 @@ def generate_question(
             q = replace_question_verb(q, new_v)
             ok, reason = validate_question(q, level)
 
-        # Check Knowledge Dimension verb alignment (Problem 6)
+        # Check Knowledge Dimension verb alignment (Problem 5)
         if ok and knowledge_dimension:
-            ok_kd, kd_reason = validate_question_kd(q, level, kd)
-            if not ok_kd:
-                if attempts < max_retries:
-                    ok = False
-                    reason = kd_reason
-                else:
-                    # Final fallback: replace verb with nearest valid verb from same Bloom level & KD
-                    old_verb = first_word(q)
-                    new_verb = nearest_valid_kd_verb(old_verb, level, kd)
-                    q = replace_question_verb(q, new_verb)
-                    ok, reason = validate_question(q, level)
+            from blooms.verb_bank import correct_stem_verb_for_kd
+            corr_q, was_corr, _ = correct_stem_verb_for_kd(q, level, kd)
+            if was_corr:
+                v_ok, _ = validate_question(corr_q, level)
+                if v_ok:
+                    q = corr_q
+            else:
+                ok_kd, kd_reason = validate_question_kd(q, level, kd)
+                if not ok_kd:
+                    if attempts < max_retries:
+                        ok = False
+                        reason = kd_reason
+                    else:
+                        old_verb = first_word(q)
+                        new_verb = nearest_valid_kd_verb(old_verb, level, kd)
+                        q = replace_question_verb(q, new_verb)
+                        ok, reason = validate_question(q, level)
+
+        # Check demand limits and trailing choices (Problem 3.2 & 3.3)
+        if ok:
+            q = simplify_stem_demands(q, marks)
+            max_dem = 2 if (marks or 5) <= 5 else (3 if (marks or 5) <= 8 else 4)
+            if count_stem_demands(q) > max_dem and attempts < max_retries:
+                ok = False
+                reason = f"overloaded stem ({count_stem_demands(q)} demands > max {max_dem})"
+
+        # Check underspecified stem (Problem 6.2)
+        if ok and is_underspecified_stem(q):
+            ok = False
+            reason = "underspecified stem: refers to 'the tools' / 'the approach' without naming referent"
+
+        # Check 8+ marks L1 multi-part recall (Problem 6.3)
+        if ok:
+            ok_l1, l1_msg = check_l1_marks_demand(q, level, marks)
+            if not ok_l1:
+                ok = False
+                reason = l1_msg
+
+        # Outdated terms glossary replacement (Problem 6.4)
+        if ok:
+            from generation.glossary import apply_glossary_replacements
+            q = apply_glossary_replacements(q)
 
         if ok:
             if not cached and not is_truncated_text(q, is_question=True):
@@ -465,12 +673,36 @@ def generate_question(
                 q = replace_question_verb(q, new_v)
                 ok, reason = validate_question(q, level)
             if ok and knowledge_dimension:
-                ok_kd, kd_reason = validate_question_kd(q, level, kd)
-                if not ok_kd:
-                    old_verb = first_word(q)
-                    new_verb = nearest_valid_kd_verb(old_verb, level, kd)
-                    q = replace_question_verb(q, new_verb)
-                    ok, reason = validate_question(q, level)
+                from blooms.verb_bank import correct_stem_verb_for_kd
+                corr_q, was_corr, _ = correct_stem_verb_for_kd(q, level, kd)
+                if was_corr:
+                    v_ok, _ = validate_question(corr_q, level)
+                    if v_ok:
+                        q = corr_q
+                else:
+                    ok_kd, kd_reason = validate_question_kd(q, level, kd)
+                    if not ok_kd:
+                        old_verb = first_word(q)
+                        new_verb = nearest_valid_kd_verb(old_verb, level, kd)
+                        q = replace_question_verb(q, new_verb)
+                        ok, reason = validate_question(q, level)
+            if ok:
+                q = simplify_stem_demands(q, marks)
+                max_dem = 2 if (marks or 5) <= 5 else (3 if (marks or 5) <= 8 else 4)
+                if count_stem_demands(q) > max_dem and attempts < max_retries:
+                    ok = False
+                    reason = f"overloaded stem ({count_stem_demands(q)} demands > max {max_dem})"
+            if ok and is_underspecified_stem(q):
+                ok = False
+                reason = "underspecified stem: refers to 'the tools' / 'the approach' without naming referent"
+            if ok:
+                ok_l1, l1_msg = check_l1_marks_demand(q, level, marks)
+                if not ok_l1:
+                    ok = False
+                    reason = l1_msg
+            if ok:
+                from generation.glossary import apply_glossary_replacements
+                q = apply_glossary_replacements(q)
             attempts += 1
             if ok:
                 if not is_truncated_text(q, is_question=True):
@@ -556,12 +788,24 @@ def generate_answer(
             reason = "empty answer"
             continue
 
-        # Validation 2: minimum length for marks
+        # Validation 2: minimum length for marks (except for short term recall questions)
+        is_term_q = bool(TERM_STEM_RE.search(question or ""))
         word_count = len(last_answer.split())
-        min_words = min(20, max(5, int(marks * 2)))
+        min_words = min(20, max(5, int(marks * 2))) if not is_term_q else 1
         if word_count < min_words:
             reason = f"answer length {word_count} words below minimum {min_words} for {marks} marks"
             continue
+
+        # Validation 2b: term answer validation (Problem 2.1)
+        ok_term, term_msg = validate_term_answer(question, last_answer)
+        if not ok_term:
+            reason = term_msg
+            continue
+
+        # Outdated terms glossary replacement (Problem 6.4)
+        from generation.glossary import apply_glossary_replacements
+        last_answer = apply_glossary_replacements(last_answer)
+        last_alternatives = [apply_glossary_replacements(a) for a in last_alternatives]
 
         # Validation 3: banned meta-commentary phrases & unseen references (Problem 4 & 5)
         has_unseen, unseen_msg = has_unseen_material_reference(last_answer, is_question=False)
@@ -930,6 +1174,8 @@ def generate_paper_by_slots(
 
     used_chunks_per_group: dict[str, set[str]] = {}
     used_chunks_per_unit: dict[Any, set[str]] = {}
+    used_pages_per_unit_group: dict[tuple[Any, str], set[int]] = {}
+    bp_warnings: dict[Any, str] = {}
     seen_questions_in_unit: dict[Any, list[str]] = {}
     seen_questions: list[str] = []
 
@@ -965,12 +1211,32 @@ def generate_paper_by_slots(
             shift = slot_offset % len(pool)
             pool = pool[shift:] + pool[:shift]
 
+        # Prioritize disjoint pages between OR counterpart alternatives (Problem 1)
+        # Deterministically partition pages between Option A and Option B
+        unit_slots = [s for s in slots if s.get("unit") == slot_unit]
+        is_choice_unit = len({s.get("question_no") for s in unit_slots}) >= 2
+        unit_all_pages = sorted(list({c.get("page_start") for c in candidate_chunks if c.get("page_start") is not None}))
+
+        if is_choice_unit and unit_all_pages:
+            unit_q_nums = sorted(list({s.get("question_no", 1) for s in unit_slots}))
+            is_option_b = (len(unit_q_nums) >= 2 and q_no == unit_q_nums[1]) or (alt_group == "B")
+            if len(unit_all_pages) < 2:
+                with group_lock:
+                    if slot_unit not in bp_warnings:
+                        bp_warnings[slot_unit] = f"Unit {slot_unit} mapped chapters have too little distinct content ({len(unit_all_pages)} page(s)) for disjoint OR alternatives."
+            else:
+                assigned_pages = set(unit_all_pages[1::2] if is_option_b else unit_all_pages[0::2])
+                disjoint_pool = [c for c in pool if c.get("page_start") in assigned_pages]
+                if disjoint_pool:
+                    pool = disjoint_pool
+                else:
+                    disjoint_cands = [c for c in candidate_chunks if c.get("page_start") in assigned_pages]
+                    if disjoint_cands:
+                        pool = disjoint_cands[:10]
+
         slot_rng.shuffle(pool)
         slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
         slot_rejected = []
-
-        with seen_lock:
-            unit_topics = list(seen_questions_in_unit.get(slot_unit, []))
 
         # Bounded retries: max 2 retries per failing slot (up to 3 attempts total)
         max_slot_tries = min(max(len(pool), 1) * 2, 3)
@@ -986,7 +1252,7 @@ def generate_paper_by_slots(
                     slot_rng,
                     marks=slot.get("marks"),
                     knowledge_dimension=slot_kd,
-                    used_topics=unit_topics,
+                    used_topics=None,
                     force_regenerate=force_regenerate,
                 )
             except Exception as e:
@@ -1027,6 +1293,8 @@ def generate_paper_by_slots(
             rec["marks"] = slot.get("marks")
             rec["alternative_group"] = alt_group
             rec["book_id"] = chunk.get("book_id")
+            rec["book_title"] = chunk.get("display_label") or chunk.get("book_title")
+            rec["display_label"] = chunk.get("display_label")
             rec["chapter"] = chunk.get("chapter")
             rec["page"] = chunk.get("page_start")
             rec["knowledge_dimension"] = slot_kd
@@ -1046,6 +1314,8 @@ def generate_paper_by_slots(
                         used_chunks_per_group.setdefault(alt_group, set()).add(cid)
                     if slot_unit is not None:
                         used_chunks_per_unit.setdefault(slot_unit, set()).add(cid)
+                    if alt_group and chunk.get("page_start"):
+                        used_pages_per_unit_group.setdefault((slot_unit, alt_group), set()).add(chunk["page_start"])
 
             with seen_lock:
                 seen_questions.append(rec["question"])
@@ -1055,7 +1325,10 @@ def generate_paper_by_slots(
             return {"status": "ok", "question": rec, "rejected": slot_rejected, "slot_idx": slot_idx}
 
         # Try a fresh chunk set outside candidate pool once more before falling back
-        outside_pool = [c for c in candidate_chunks if c not in pool and is_content_chunk(c)]
+        outside_pool = [
+            c for c in candidate_chunks
+            if c not in pool and is_content_chunk(c) and (not is_choice_unit or not unit_all_pages or len(unit_all_pages) < 2 or c.get("page_start") in assigned_pages)
+        ]
         if outside_pool:
             fresh_chunk = slot_rng.choice(outside_pool)
             try:
@@ -1066,7 +1339,7 @@ def generate_paper_by_slots(
                     slot_rng,
                     marks=slot.get("marks"),
                     knowledge_dimension=slot_kd,
-                    used_topics=unit_topics,
+                    used_topics=None,
                     force_regenerate=force_regenerate,
                 )
                 if rec.get("valid"):
@@ -1082,12 +1355,17 @@ def generate_paper_by_slots(
                         rec["marks"] = slot.get("marks")
                         rec["alternative_group"] = alt_group
                         rec["book_id"] = fresh_chunk.get("book_id")
+                        rec["book_title"] = fresh_chunk.get("display_label") or fresh_chunk.get("book_title")
+                        rec["display_label"] = fresh_chunk.get("display_label")
                         rec["chapter"] = fresh_chunk.get("chapter")
                         rec["page"] = fresh_chunk.get("page_start")
                         rec["knowledge_dimension"] = slot_kd
                         rec["kd"] = slot_kd
                         rec["review_flags"] = []
                         rec["needs_review"] = False
+                        with group_lock:
+                            if alt_group and fresh_chunk.get("page_start"):
+                                used_pages_per_unit_group.setdefault((slot_unit, alt_group), set()).add(fresh_chunk["page_start"])
                         return {"status": "ok", "question": rec, "rejected": slot_rejected, "slot_idx": slot_idx}
             except Exception:
                 pass
@@ -1114,6 +1392,8 @@ def generate_paper_by_slots(
             "sub_index": slot.get("sub_index"),
             "alternative_group": alt_group,
             "book_id": "",
+            "book_title": "",
+            "display_label": "",
             "chapter": "",
             "page": "",
         }
@@ -1181,17 +1461,80 @@ def generate_paper_by_slots(
         from retrieval.co_mapper import _m
         embedder = _m()
 
-        # 1. Duplicate check (Problem 2.3)
+        # 1. Duplicate check (Problem 1 & Problem 2.3)
         if len(questions) >= 2 and embedder is not None:
             dups = check_question_duplicates(questions, embedder)
             for orig_i, orig_j, sim in dups:
+                q_i = questions[orig_i]
                 q_j = questions[orig_j]
+                is_same_unit = (q_i.get("unit") is not None and q_i.get("unit") == q_j.get("unit"))
+                is_or_counterpart = is_same_unit and (q_i.get("alternative_group") != q_j.get("alternative_group"))
+                flag_name = "OR counterpart similarity" if is_or_counterpart else "duplicate question"
                 q_j["needs_review"] = True
                 q_j.setdefault("review_flags", []).append(
-                    f"duplicate question: cosine similarity {sim:.2f} >= {QUESTION_SIMILARITY_DUPLICATE_THRESHOLD} with {questions[orig_i].get('id', 'earlier slot')}"
+                    f"{flag_name}: cosine similarity {sim:.2f} >= {QUESTION_SIMILARITY_DUPLICATE_THRESHOLD} with {q_i.get('id', 'earlier slot')}"
                 )
 
-        # 2. CO similarity check (Problem 3.2) - Vectorized & Batched
+        # 2. Batched grounding check after first pass (Problem 2.2)
+        candidate_grounding = [
+            q for q in questions
+            if q.get("valid", True) and not q.get("question", "").startswith("[NEEDS REVIEW")
+            and q.get("answer") and not q.get("answer", "").startswith("[NEEDS REVIEW")
+        ]
+        if candidate_grounding and embedder is not None:
+            try:
+                import numpy as np
+                chunk_map = {c.get("chunk_id"): c.get("text", "") for c in usable if c.get("chunk_id")}
+                q_sentence_items = []
+                for q in candidate_grounding:
+                    ans = q.get("answer", "")
+                    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ans) if s.strip() and len(s.split()) >= 4]
+                    if sents:
+                        ctx = q.get("context_text") or (chunk_map.get(q.get("chunk_id")) if q.get("chunk_id") else "")
+                        if not ctx and q.get("page"):
+                            matching_c = [c for c in usable if c.get("page_start") == q.get("page")]
+                            if matching_c:
+                                ctx = matching_c[0].get("text", "")
+                        if ctx:
+                            q_sentence_items.append((q, ctx, sents))
+
+                if q_sentence_items:
+                    all_ctx_texts = [item[1] for item in q_sentence_items]
+                    all_sent_texts = [s for item in q_sentence_items for s in item[2]]
+                    encoded_all = embedder.encode(all_ctx_texts + all_sent_texts, normalize_embeddings=True)
+                    ctx_embs = encoded_all[:len(all_ctx_texts)]
+                    sent_embs = encoded_all[len(all_ctx_texts):]
+
+                    sent_idx = 0
+                    for c_idx, (q, _, sents) in enumerate(q_sentence_items):
+                        c_vec = ctx_embs[c_idx]
+                        unsupported = []
+                        for s in sents:
+                            s_vec = sent_embs[sent_idx]
+                            sim_val = float(np.dot(s_vec, c_vec))
+                            if sim_val < ANSWER_GROUNDING_SENTENCE_SIMILARITY:
+                                unsupported.append(s)
+                            sent_idx += 1
+                        if unsupported:
+                            q["ungrounded_sentences"] = unsupported
+                            q["needs_review"] = True
+                            q.setdefault("review_flags", []).append(
+                                f"ungrounded sentences in model answer ({len(unsupported)})"
+                            )
+            except Exception:
+                pass
+
+        # 3. Cross-slot consistency contradiction check (Problem 2.3)
+        contradictions = check_cross_slot_contradictions(questions, embedder)
+        for orig_i, orig_j, c_msg in contradictions:
+            if orig_j < len(questions):
+                questions[orig_j]["needs_review"] = True
+                questions[orig_j].setdefault("review_flags", []).append(c_msg)
+            if orig_i < len(questions):
+                questions[orig_i]["needs_review"] = True
+                questions[orig_i].setdefault("review_flags", []).append(c_msg)
+
+        # 4. CO similarity check (Problem 3.2) - Vectorized & Batched
         if outcome_descs and embedder is not None:
             candidate_qs = [
                 (idx, q_rec, q_rec.get("co"), outcome_descs.get(q_rec.get("co")))
@@ -1223,7 +1566,7 @@ def generate_paper_by_slots(
                 except Exception:
                     pass
 
-        # 3. Consistency across paper (Problem 5.6)
+        # 5. Consistency across paper (Problem 5.6)
         inconsistencies = check_paper_identifier_consistency(questions)
         for q_idx, inc_msg in inconsistencies:
             if q_idx < len(questions):
@@ -1235,7 +1578,10 @@ def generate_paper_by_slots(
         if q_nos and min(q_nos) > 1:
             questions = normalize_paper_question_numbers(questions)
 
-    return {"questions": questions, "rejected": rejected, "unfilled": unfilled}
+    res_dict = {"questions": questions, "rejected": rejected, "unfilled": unfilled}
+    if bp_warnings:
+        res_dict["warnings"] = list(bp_warnings.values())
+    return res_dict
 
 
 def generate_full_paper(
