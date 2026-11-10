@@ -187,8 +187,31 @@ def _looks_like_index(lines: list[str]) -> bool:
     return (index_matches / len(lines)) >= 0.35
 
 
+def _is_divider_page(text: str, lines: Optional[list[str]] = None) -> bool:
+    """Check if page is a section or part divider with low teachable content."""
+    t = (text or "").strip()
+    words = len(t.split())
+    if words < 150:
+        # Match standalone "PART 3", "SECTION 2", "PART III", not numbered subsections like "Section 10.3"
+        first_line = t.splitlines()[0].strip() if t.splitlines() else t
+        if re.search(r"^(?:part|section)\s+[0-9ivxlc]+(?!\.\d+)\b", first_line, re.I):
+            # Standalone divider pages have minimal body text (< 80 words or no full paragraphs/subsections)
+            if words < 80:
+                return True
+            raw_lns = lines or [l.strip() for l in t.splitlines() if l.strip()]
+            if len(raw_lns) <= 4 and not any(re.search(r"\b(section|chapter|\d+\.\d+)\b", ln, re.I) for ln in raw_lns[1:]):
+                return True
+        if re.search(r"\bthis\s+(?:section|part)\s+(?:comprises|explains|contains|covers|introduces)\b", t, re.I) and words < 80:
+            return True
+        if re.search(r"\bcomprises\s+the\s+following\s+chapters\b", t, re.I) and words < 100:
+            return True
+    return False
+
+
 def _is_chapter_content(text: str, lines: Optional[list[str]] = None) -> bool:
     """Safety check: True if page contains chapter content, exercises, or summaries that must be kept."""
+    if _is_divider_page(text, lines):
+        return False
     t_lower = text.lower()
     raw_lines = lines or [l.strip() for l in text.splitlines() if l.strip()]
 
@@ -539,6 +562,10 @@ def filter_pages(
         # Never skip a middle page because of a keyword match!
         # -------------------------------------------------------------------
         if in_middle_zone:
+            # Check for section/part divider pages in middle zone
+            if _is_divider_page(text, raw_lines):
+                skipped.append(SkippedPage(page=page, reason=f"section_divider_page (< 150 words: {word_count})"))
+                continue
             # In the middle zone, keep pages unless completely empty (< 5 words)
             if word_count < 5:
                 skipped.append(SkippedPage(page=page, reason=f"empty_page (< 5 words: {word_count})"))

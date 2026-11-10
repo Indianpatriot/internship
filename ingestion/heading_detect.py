@@ -19,12 +19,25 @@ NON_CONTENT_TITLES = {
     "about the cover illustration", "welcome", "to get the most out of this book",
     "conventions used", "get in touch", "reviews", "other books you may enjoy",
     "assessments", "answers", "answers to exercises", "answers to problems",
-    "appendix", "appendices", "title page", "half title"
+    "appendix", "appendices", "title page", "half title",
+    "roadmap", "about the code", "about packt", "author online", "book forum",
+    "other online resources", "back cover", "endpapers", "getting help",
+    "configuring docker", "restarting docker", "setting up",
+    "the virtual machine approach", "native docker client and virtual machine"
 }
 
 NON_CONTENT_PATTERNS = [
     r"\babout\s+this\s+book\b",
     r"\babout\s+the\s+cover(?:\s+illustration)?\b",
+    r"\babout\s+the\s+code\b",
+    r"\babout\s+packt\b",
+    r"\broadmap\b",
+    r"\bauthor\s+online\b",
+    r"\bbook\s+forum\b",
+    r"\bother\s+online\s+resources\b",
+    r"\bback\s+cover\b",
+    r"\bendpapers\b",
+    r"[-–—]back\b",
     r"\babout\s+the\s+authors?\b",
     r"\babout\s+the\s+technical\s+(?:editor|reviewer)s?\b",
     r"\babout\s+the\s+reviewers?\b",
@@ -58,6 +71,13 @@ NON_CONTENT_PATTERNS = [
     r"\bhalf\s+title\b",
     r"\bappendix\b",
     r"\bappendices\b",
+    r"\bgetting\s+help\b",
+    r"\bconfiguring\s+docker\b",
+    r"\brestarting\s+docker\b",
+    r"\bsetting\s+up\b",
+    r"\bthe\s+virtual\s+machine\s+approach\b",
+    r"\bnative\s+docker\s+client\b",
+    r"\binstalling\s+(?:and\s+using\s+)?(?:docker|tools?|software)\b",
 ]
 NON_CONTENT_REGEX = re.compile("|".join(NON_CONTENT_PATTERNS), re.I)
 
@@ -232,16 +252,52 @@ def _detect_layer_1_outline(lines, toc, n_pages=None):
     lvl1 = [e for e in toc if len(e) >= 3 and e[0] == 1 and not is_non_content_title(e[1])]
     lvl2 = [e for e in toc if len(e) >= 3 and e[0] == 2 and not is_non_content_title(e[1])]
 
-    is_lvl1_parts = lvl1 and all(re.match(r"^(?:part)\b", e[1].strip(), re.I) for e in lvl1)
+    is_lvl1_parts = lvl1 and any(re.match(r"^(?:part|section)\b", e[1].strip(), re.I) for e in lvl1)
     if is_lvl1_parts and len(lvl2) >= 2:
         target_toc = lvl2
     elif len(lvl1) >= 2:
-        target_toc = lvl1
+        has_chapters = any(re.match(r"^(?:chapter\b|\d+[\.:\s])", e[1].strip(), re.I) for e in lvl1)
+        if has_chapters:
+            target_toc = [e for e in lvl1 if not re.match(r"^(?:part|section)\s+\d+", e[1].strip(), re.I)]
+        else:
+            target_toc = lvl1
+    elif len(lvl2) >= 2:
+        target_toc = lvl2
     else:
         target_toc = [e for e in toc if len(e) >= 3 and not is_non_content_title(e[1])]
 
     found = _toc_headings(lines, target_toc)
     clean_found = [h for h in found if not is_non_content_title(h["title"])]
+
+    # If real chapters exist, drop pure Part / Section groupings
+    has_real_chaps = any(
+        re.match(r"^(?:chapter\b|\d+[\.:\s])", h["title"].strip(), re.I)
+        for h in clean_found
+    )
+    if has_real_chaps:
+        clean_found = [
+            h for h in clean_found
+            if not re.match(r"^(?:part|section)\s+\d+", h["title"].strip(), re.I)
+        ]
+
+    # If clean_found contains ONLY parts/sections, try lvl2 if not tried yet, else reject layer 1
+    only_parts = clean_found and all(
+        re.match(r"^(?:part|section)\b", h["title"].strip(), re.I)
+        for h in clean_found
+    )
+    if only_parts and target_toc != lvl2 and len(lvl2) >= 2:
+        found2 = _toc_headings(lines, lvl2)
+        clean2 = [h for h in found2 if not is_non_content_title(h["title"])]
+        if validate_headings_list(clean2, n_pages):
+            for h in clean2:
+                h["method"] = "pdf_outline"
+                h["confidence"] = 0.95
+            return clean2
+
+    if only_parts:
+        # Reject layer 1 when only parts/sections are found so finer layers can find real chapters
+        return None
+
     if validate_headings_list(clean_found, n_pages):
         for h in clean_found:
             h["method"] = "pdf_outline"
@@ -446,6 +502,27 @@ def _detect_layer_4_semantic_windows(lines, n_pages=None):
     return heads
 
 
+def _only_parts(heads: Optional[list[dict[str, Any]]]) -> bool:
+    if not heads:
+        return True
+    return all(re.match(r"^(?:part|section)\b", h.get("title", "").strip(), re.I) for h in heads)
+
+
+def _prefer_chapters_over_parts(heads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not heads:
+        return heads
+    has_real_chaps = any(
+        re.match(r"^(?:chapter\b|\d+[\.:\s])", h.get("title", "").strip(), re.I)
+        for h in heads
+    )
+    if has_real_chaps:
+        return [
+            h for h in heads
+            if not re.match(r"^(?:part|section)\s+\d+", h.get("title", "").strip(), re.I)
+        ]
+    return heads
+
+
 def detect_headings(lines, toc=None, n_pages=None):
     """Return [{line_idx,last_idx,level,title,page,method,confidence}] in document order."""
     if n_pages is None and lines:
@@ -453,16 +530,24 @@ def detect_headings(lines, toc=None, n_pages=None):
 
     # Layer 1: PDF bookmarks/outline
     h1 = _detect_layer_1_outline(lines, toc, n_pages)
-    if h1:
-        return h1
+    if h1 and not _only_parts(h1):
+        return _prefer_chapters_over_parts(h1)
 
     # Layer 2: TOC pages parsed from body
     h2 = _detect_layer_2_toc_pages(lines, n_pages)
-    if h2:
-        return h2
+    if h2 and not _only_parts(h2):
+        return _prefer_chapters_over_parts(h2)
 
     # Layer 3: Font-size/bold + regex headings in body
     h3 = _detect_layer_3_body_headings(lines, n_pages)
+    if h3 and not _only_parts(h3):
+        return _prefer_chapters_over_parts(h3)
+
+    # If any previous layer returned parts and layers 2-3 found nothing, prefer h1/h2/h3 over semantic
+    if h1:
+        return h1
+    if h2:
+        return h2
     if h3:
         return h3
 

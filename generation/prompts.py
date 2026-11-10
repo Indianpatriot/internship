@@ -6,12 +6,15 @@ from blooms.verb_bank import LEVEL_NAMES, normalize_level
 
 BASE = """You are an expert exam question setter.
 Using ONLY the context below, write exactly ONE high-quality, clear, sensible {name}-level (Bloom's {level}) exam question.
+Assigned Knowledge Dimension: {kd_name}.
 The question MUST start with one of these verbs: {verbs}.
 Rules:
-- Use only facts present in the context. Do not use outside knowledge.
-- Do not mention "the context", "the passage", "the text", "the book", "this book", "this text", "the chapter", "the author", "the tutorial", "Chapter", "Figure", "Table", "Section", or "target audience" in the question.
-- The question must be a completely SELF-CONTAINED university exam question testing the technical concept, definition, algorithm, or mechanism.
-- Focus purely on core technical concepts, definitions, algorithms, or mechanisms. The question must be realistic and complete.
+- Use only technical facts present in the context. Do not use outside knowledge.
+- The question must be completely SELF-CONTAINED and answerable by a student who does NOT have the textbook or notes in front of them.
+- NEVER refer to "the context", "the provided context", "the passage", "the text", "the book", "the author", "the chapter", "Chapter", "Section", "Figure", "Table", "Listing", "the listing", "the example", "the technique", "this technique", "above", "below", or "provided".
+- If the question involves code, a command, or a script, you MUST include the exact code or command inline in the question text. NEVER say "the code snippet", "the following code", "the describe method", or "the script" without writing it out inline.
+- For comparison/contrast questions, compare concepts from the same technical category, and never formulate circular questions (do not compare a thing with itself or its direct definition).
+- Do NOT use "Calculate" or "Compute" unless the context contains concrete numbers, formulas, or quantitative metrics.{used_topics_rule}
 - {hint}{kd_hint}{marks}
 - Output only the question text ending with '?'. No numbering, no preamble, no answer.
 
@@ -27,7 +30,7 @@ LEVEL_HINTS = {
     "L2": "Ask the student to explain or describe a concept in their own words.",
     "L3": "Require applying a concept or procedure from the context to a concrete situation.",
     "L4": "Require breaking the content into parts, or comparing and contrasting ideas from it.",
-    "L5": "Require a justified judgement or critique grounded in the context.",
+    "L5": "Require a justified judgement, recommendation, or critique grounded in the context.",
     "L6": "Ask the student to design or propose something new built on ideas from the context.",
 }
 
@@ -35,7 +38,7 @@ KNOWLEDGE_HINTS = {
     "Factual": " Focus on core definitions, basic terms, symbols, and factual elements from the text.",
     "Conceptual": " Focus on system relationships, categories, principles, theories, and architectural structure.",
     "Procedural": " Focus on algorithms, techniques, methods of inquiry, and step-by-step procedures.",
-    "Metacognitive": " Focus on cognitive reflection, evaluating methodologies, and strategic thinking.",
+    "Metacognitive": " Focus on strategic evaluation, justifying choices between alternatives, and assessing trade-offs.",
 }
 
 MARKS_HINTS = {
@@ -45,19 +48,30 @@ MARKS_HINTS = {
 }
 
 
-def build_prompt(context, level, verbs, marks=None, knowledge_dimension=None) -> str:
+def build_prompt(
+    context: str,
+    level: str,
+    verbs: list[str],
+    marks: Optional[int] = None,
+    knowledge_dimension: Optional[str] = None,
+    used_topics: Optional[list[str]] = None,
+) -> str:
     level = normalize_level(level)
-    kd_hint = ""
-    if knowledge_dimension:
-        kd = normalize_knowledge_dimension(knowledge_dimension)
-        kd_hint = KNOWLEDGE_HINTS.get(kd, "")
+    kd_name = normalize_knowledge_dimension(knowledge_dimension) if knowledge_dimension else "Conceptual"
+    kd_hint = KNOWLEDGE_HINTS.get(kd_name, "")
+    used_topics_rule = ""
+    if used_topics:
+        used_topics_rule = f"\n- Avoid the following topics already tested in this exam unit: {', '.join(used_topics)}."
+
     return BASE.format(
         name=LEVEL_NAMES[level],
         level=level,
+        kd_name=kd_name,
         verbs=", ".join(verbs),
         hint=LEVEL_HINTS[level],
         kd_hint=kd_hint,
         marks=MARKS_HINTS.get(marks, ""),
+        used_topics_rule=used_topics_rule,
         context=context.strip(),
     )
 
@@ -67,7 +81,9 @@ Provide an authoritative model answer for the exam question below using ONLY the
 
 Rules:
 - Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text.
-- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated"), and do not invent contradictory alternatives. Write the exact answer an examiner expects.
+{strict_rule}- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated"), and do not invent contradictory alternatives. Write the exact answer an examiner expects.
+- The model answer must be completely self-contained. NEVER write phrases such as "according to the provided context", "in the provided example", "as shown in Listing", "as described in the passage", or "the provided text".
+- Address all parts of the question directly (such as trade-offs, advantages, consequences, steps, or justification).
 - Target answer length: approximately {target_words} words (appropriate for a {marks}-mark question).
 - If multiple valid approaches exist, label them clearly with "Alternative approach:". NEVER use "OR" or "― OR ―" inside the answer text.
 - Output only the model answer text. No conversational preamble, no greetings, no markdown fences.
@@ -83,13 +99,25 @@ Question:
 Model Answer:"""
 
 
-def build_answer_prompt(question: str, context: str, marks: Optional[int] = None) -> str:
+def build_answer_prompt(
+    question: str,
+    context: str,
+    marks: Optional[int] = None,
+    strict_grounding: bool = False,
+) -> str:
     """Build prompt for generating a grounded model answer."""
     m = marks if marks is not None and marks > 0 else 5
     target_words = max(30, min(500, m * 25))
+    strict_rule = (
+        "- STRICT GROUNDING: Answer strictly and only from the provided context. Do not invent facts, claims, or tools. "
+        "Every statement must be directly verifiable in the context.\n"
+        if strict_grounding
+        else ""
+    )
     return ANSWER_BASE.format(
         target_words=target_words,
         marks=m,
+        strict_rule=strict_rule,
         context=context.strip(),
         question=question.strip(),
     )

@@ -991,5 +991,23 @@ def test_autofill_textbook_mapping_integration():
     assert res[3]["chapters"] == {}
 
 
+def test_app_unmapped_units_defined():
+    """Verify that unmapped_units and books are defined in app.py before the generation button check."""
+    import ast
+    with open("app.py", "r") as f:
+        tree = ast.parse(f.read(), filename="app.py")
+
+    assigned_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    assigned_names.add(t.id)
+
+    assert "unmapped_units" in assigned_names
+    assert "books" in assigned_names
+
+
+
 
 

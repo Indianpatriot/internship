@@ -1039,6 +1039,8 @@ selected_sections = None
 page_range = None
 can_generate = False
 library = {"books": {}, "chunks": []}
+books = {}
+unmapped_units = []
 
 if uploaded_pdfs:
     upload_dir = Path(".cache/uploads")
@@ -1290,6 +1292,21 @@ if uploaded_pdfs:
             for sw in source_warnings:
                 st.warning(f"⚠️ {sw}")
 
+            # Problem 3.3: Warning when mapped chapters have low similarity to Course Outcomes
+            if outcomes_valid:
+                from config import CO_MAPPING_WARNING_THRESHOLD
+                for u in active_units:
+                    if updated_sources.get(u) and any(bool(v) for v in (updated_sources[u] or {}).values() if v is not None):
+                        u_chunks = select_chunks_for_unit(raw_chunks, updated_sources, u)
+                        if u_chunks:
+                            co_sims = []
+                            for c in u_chunks:
+                                scores = c.get("co_scores", {})
+                                if scores:
+                                    co_sims.extend(scores.values())
+                            if co_sims and max(co_sims) < CO_MAPPING_WARNING_THRESHOLD:
+                                st.warning(f"⚠️ Mapped chapters for Unit {u} do not match the Course Outcomes well.")
+
         # Soft hint for unmapped units (strictly optional, does not block generation)
         unmapped_units = [
             u for u in active_units
@@ -1414,10 +1431,27 @@ if generate_clicked:
                 unit_sources=unit_sources,
                 workers=config.GENERATION_WORKERS,
                 force_regenerate=force_regenerate,
+                keep_placeholders=True,
+                outcome_descs=outcomes_dict,
             )
             progress_bar.progress(1.0)
             status_text.empty()
-            results["covered_chapters"] = selected_chapters
+
+            # Map chapters specifically for paper's active units only (Problem 7.4)
+            mapped_chaps_for_units = []
+            if unit_sources:
+                for u in active_units:
+                    b_map = unit_sources.get(u) or unit_sources.get(str(u)) or {}
+                    for b_id, chaps in b_map.items():
+                        if chaps:
+                            b_info = books.get(b_id, {})
+                            b_title = b_info.get("title", b_id)
+                            for ch in chaps:
+                                mapped_chaps_for_units.append(f"{b_title} - {ch}")
+            if not mapped_chaps_for_units:
+                mapped_chaps_for_units = [q.get("chapter") for q in results.get("questions", []) if q.get("chapter")]
+
+            results["covered_chapters"] = mapped_chaps_for_units
             st.session_state.results = results
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
@@ -1435,6 +1469,60 @@ if st.session_state.results:
 
     if covered_chaps:
         st.markdown(f"**Generated from Chapters:** `{', '.join(covered_chaps)}`")
+
+    # Problem 1.2: Completeness check and "Regenerate missing slots" button
+    from generation.generator import regenerate_missing_slots, verify_paper_completeness
+    is_complete, completeness_issues = verify_paper_completeness(st.session_state.slots, questions)
+    if not is_complete:
+        st.error(f"⚠️ **Paper Completeness Issues Detected ({len(completeness_issues)}):**")
+        for iss in completeness_issues:
+            st.markdown(f"- {iss}")
+        col_reg1, col_reg2 = st.columns([2.5, 4.5])
+        with col_reg1:
+            if st.button("🔄 Regenerate missing slots", key="btn_regen_missing", use_container_width=True):
+                with st.spinner("Regenerating incomplete slots..."):
+                    regen_res = regenerate_missing_slots(
+                        questions=questions,
+                        slots=st.session_state.slots,
+                        chunks=scored_chunks,
+                        client=client,
+                        seed=42,
+                        unit_sources=unit_sources,
+                        outcomes=outcomes_dict,
+                    )
+                    st.session_state.results["questions"] = regen_res["questions"]
+                    st.rerun()
+
+    # Problem 5.7: Faculty Review Panel for flagged slots
+    flagged_slots = [q for q in questions if q.get("needs_review") or q.get("review_flags")]
+    if flagged_slots:
+        with st.expander(f"🚩 Review Flags ({len(flagged_slots)} items flagged)", expanded=True):
+            st.caption("Faculty Review Panel: Automated quality validators flagged the following slots for review.")
+            for fq in flagged_slots:
+                f_id = fq.get("id", "Slot")
+                f_flags = fq.get("review_flags", [fq.get("review_reason", "Review needed")])
+                st.markdown(f"**{f_id}** ({fq.get('level')}, {fq.get('co')}): `{', '.join(f_flags)}`")
+                if fq.get("ungrounded_sentences"):
+                    st.caption("Flagged ungrounded statements:")
+                    for us in fq["ungrounded_sentences"]:
+                        st.markdown(f"> *{us}*")
+
+            report_lines = ["QUESTION PAPER REVIEW REPORT", "=" * 30]
+            for fq in flagged_slots:
+                report_lines.append(f"Question: {fq.get('id')} ({fq.get('level')}, {fq.get('co')})")
+                report_lines.append(f"Stem: {fq.get('question')}")
+                report_lines.append(f"Flags: {', '.join(fq.get('review_flags', []))}")
+                if fq.get("ungrounded_sentences"):
+                    report_lines.append("Ungrounded sentences:")
+                    for us in fq["ungrounded_sentences"]:
+                        report_lines.append(f"  - {us}")
+                report_lines.append("-" * 30)
+            st.download_button(
+                "📥 Download Review Report",
+                data="\n".join(report_lines),
+                file_name="paper_review_report.txt",
+                mime="text/plain",
+            )
 
     if unfilled:
         unfilled_details = ", ".join(
@@ -1577,6 +1665,21 @@ if st.session_state.results:
         )
         csv_data = df.to_csv(index=False).encode("utf-8")
 
+        has_placeholders = any(
+            q.get("needs_review") or str(q.get("question", "")).startswith("[NEEDS REVIEW")
+            for q in questions
+        )
+        can_download = True
+        if has_placeholders:
+            st.warning("⚠️ **Warning**: This paper contains incomplete placeholder slots marked for review. Please review or regenerate them before exporting.")
+            can_download = st.checkbox(
+                "I acknowledge some slots are placeholders and wish to export anyway",
+                value=False,
+                key="confirm_export_incomplete",
+            )
+            if not can_download:
+                st.info("ℹ️ Check the box above to enable downloading this paper.")
+
         col_docx, col_pdf, col_csv = st.columns([2.5, 2.5, 2])
         with col_docx:
             st.download_button(
@@ -1585,6 +1688,7 @@ if st.session_state.results:
                 file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
+                disabled=not can_download,
                 use_container_width=True,
             )
         with col_pdf:
@@ -1594,6 +1698,7 @@ if st.session_state.results:
                 file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.pdf",
                 mime="application/pdf",
                 type="primary",
+                disabled=not can_download,
                 use_container_width=True,
             )
         with col_csv:
@@ -1602,6 +1707,7 @@ if st.session_state.results:
                 data=csv_data,
                 file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.csv",
                 mime="text/csv",
+                disabled=not can_download,
                 use_container_width=True,
             )
 

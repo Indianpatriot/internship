@@ -1,18 +1,37 @@
 """Multi-book retrieval and unit-to-textbook mapping."""
 import logging
+import re
 from typing import Any, Optional
 
+from config import MIN_PAGE_CONTENT_WORDS
 from ingestion.heading_detect import is_non_content_title
 
 logger = logging.getLogger(__name__)
 
 
 def is_content_chunk(c: dict[str, Any]) -> bool:
-    """Check whether a chunk belongs to real content rather than front/back matter."""
+    """Check whether a chunk belongs to real content rather than front/back matter or section dividers."""
     chap = c.get("chapter", "")
     sec = c.get("section", "")
     if is_non_content_title(chap) or is_non_content_title(sec):
         return False
+
+    # Exclude chunks whose chapter attribution is a pure Section or Part heading without real chapters
+    if re.match(r"^(?:section|part)\s+\d+", str(chap).strip(), re.I) and not re.search(r"\bchapter\b", str(chap), re.I):
+        return False
+
+    text = (c.get("text") or "").strip()
+    words = c.get("word_count", len(text.split()))
+
+    # Exclude section/part divider pages and very thin pages below MIN_PAGE_CONTENT_WORDS
+    if words < MIN_PAGE_CONTENT_WORDS:
+        if re.search(r"^(?:section|part)\s+[0-9ivxlc]+", text, re.I):
+            return False
+        if re.search(r"\bthis\s+(?:section|part)\s+(?:comprises|explains|contains|covers|introduces)\b", text, re.I):
+            return False
+        if re.search(r"\bcomprises\s+the\s+following\s+chapters\b", text, re.I):
+            return False
+
     return True
 
 

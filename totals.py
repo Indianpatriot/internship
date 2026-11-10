@@ -71,6 +71,7 @@ def summarize(
     questions: list[dict[str, Any]],
     targets: Optional[dict[str, Any]] = None,
     attempted_only: bool = True,
+    blueprint_slots: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Summarize question paper totals across COs, BT levels, and target differences.
 
@@ -79,6 +80,9 @@ def summarize(
         targets: Target Weights dictionary (e.g. contracts.Weights).
         attempted_only: When True, counts only one question per alternative choice group.
             When False, counts all questions offered in the paper.
+        blueprint_slots: Optional list of blueprint slot dictionaries. When provided,
+            totals and distributions are computed from the BLUEPRINT targets rather than
+            surviving questions.
 
     Returns:
         {
@@ -87,17 +91,33 @@ def summarize(
             "by_bt_band": {"L1-L2": ..., "L3-L4": ..., "L5-L6": ...},
             "total_marks": int,
             "offered_marks": int,
-            "targets_diff": {"bt_band": {...}, "co": {...}}
+            "targets_diff": {"bt_band": {...}, "co": {...}},
+            "warnings": list[str]
         }
     """
-    offered_marks = sum(int(q.get("marks", 0)) for q in questions)
+    warnings: list[str] = []
+    source_slots = blueprint_slots if (blueprint_slots is not None and len(blueprint_slots) > 0) else questions
+
+    offered_marks = sum(int(s.get("marks", 0)) for s in source_slots)
 
     if attempted_only:
-        evaluated_questions = _filter_attempted_questions(questions)
+        evaluated_questions = _filter_attempted_questions(source_slots)
     else:
-        evaluated_questions = list(questions)
+        evaluated_questions = list(source_slots)
 
-    total_marks = sum(int(q.get("marks", 0)) for q in evaluated_questions)
+    total_marks = sum(int(s.get("marks", 0)) for s in evaluated_questions)
+
+    # Check for discrepancy between generated surviving questions and blueprint
+    if blueprint_slots is not None and questions:
+        surviving_offered = sum(
+            int(q.get("marks", 0))
+            for q in questions
+            if not str(q.get("question", "")).startswith("[NEEDS REVIEW") and q.get("valid", True)
+        )
+        if surviving_offered != offered_marks:
+            warnings.append(
+                f"Generated surviving marks ({surviving_offered} offered) differ from blueprint specification ({offered_marks} offered marks)."
+            )
 
     # Initialize by_bt for all L1-L6
     by_bt: dict[str, dict[str, Any]] = {
@@ -176,6 +196,7 @@ def summarize(
         "total_marks": total_marks,
         "offered_marks": offered_marks,
         "targets_diff": targets_diff,
+        "warnings": warnings,
     }
 
 

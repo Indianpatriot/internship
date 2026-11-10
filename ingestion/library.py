@@ -19,8 +19,8 @@ from ingestion.pipeline import ingest
 from retrieval.sources import select_chunks_for_unit
 
 CACHE_DIR = Path(".cache/ingestion")
-FILTER_VERSION = "pf_v5"
-DETECTION_VERSION = "hd_v2"
+FILTER_VERSION = "pf_v6"
+DETECTION_VERSION = "hd_v3"
 HEX_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8,64}[_-]+", re.I)
 
 
@@ -205,6 +205,13 @@ def load_library(
                     if ch_lower not in seen_ch_lower:
                         seen_ch_lower.add(ch_lower)
                         ordered_chapters.append(norm_ch)
+
+        has_real = any(re.match(r"^(?:chapter\b|\d+[\.:\s])", ch.strip(), re.I) for ch in ordered_chapters)
+        if has_real:
+            ordered_chapters = [
+                ch for ch in ordered_chapters
+                if not re.match(r"^(?:part|section)\s+\d+", ch.strip(), re.I)
+            ]
 
         min_page = min((c.get("page_start", 1) for c in chunks), default=1)
         max_page = max((c.get("page_end", 1) for c in chunks), default=1)

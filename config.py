@@ -16,6 +16,14 @@ MIN_CONTEXT_WORDS = 40      # chunks shorter than this are not used for question
 MAX_CONTEXT_WORDS = 450     # context truncated to this before prompting
 ANSWER_MIN_SIMILARITY = float(os.getenv("ANSWER_MIN_SIMILARITY", "0.35"))
 
+# Quality & Validation Thresholds (Problems 2, 3, 5)
+MIN_PAGE_CONTENT_WORDS = int(os.getenv("MIN_PAGE_CONTENT_WORDS", "150"))  # exclude divider/thin pages
+QUESTION_SIMILARITY_DUPLICATE_THRESHOLD = float(os.getenv("QUESTION_SIMILARITY_DUPLICATE_THRESHOLD", "0.85"))
+CO_SIMILARITY_THRESHOLD = float(os.getenv("CO_SIMILARITY_THRESHOLD", "0.40"))
+CO_MAPPING_WARNING_THRESHOLD = float(os.getenv("CO_MAPPING_WARNING_THRESHOLD", "0.25"))
+ANSWER_GROUNDING_SENTENCE_SIMILARITY = float(os.getenv("ANSWER_GROUNDING_SENTENCE_SIMILARITY", "0.45"))
+ANSWER_MAX_UNGROUNDED_SENTENCE_RATIO = float(os.getenv("ANSWER_MAX_UNGROUNDED_SENTENCE_RATIO", "0.35"))
+
 # Course Outcomes constraints
 MIN_COS = 4
 MAX_COS = 6

@@ -51,6 +51,74 @@ def clean_book_name(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def format_covered_chapters_header(
+    covered_chapters: Optional[list[str]] = None,
+    questions: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    """Format 'Syllabus / Covered Chapters' for academic paper export headers.
+
+    Lists ONLY chapters mapped to the paper's units, grouped by book, using clean titles.
+    Never includes Parts, Sections, Roadmap, About the code, About Packt, or appendix items.
+    """
+    from ingestion.heading_detect import is_non_content_title
+
+    book_to_chaps: dict[str, list[str]] = {}
+
+    def _add_entry(b_title: str, ch_name: str):
+        b_clean = clean_book_name(b_title)
+        ch_clean = clean_book_name(ch_name)
+        if not ch_clean or is_non_content_title(ch_clean):
+            return
+        if re.match(r"^(?:section|part)\s+\d+", ch_clean, re.I) and not re.search(r"\bchapter\b", ch_clean, re.I):
+            return
+        if b_clean and ch_clean.lower().startswith(b_clean.lower()):
+            ch_clean = ch_clean[len(b_clean):].lstrip(" -:•")
+        if not ch_clean:
+            return
+        book_key = b_clean or "Textbook"
+        if book_key not in book_to_chaps:
+            book_to_chaps[book_key] = []
+        if ch_clean not in book_to_chaps[book_key]:
+            book_to_chaps[book_key].append(ch_clean)
+
+    # 1. From questions
+    if questions:
+        for q in questions:
+            b_title = q.get("book_title") or q.get("book_id") or ""
+            ch = q.get("chapter") or ""
+            if ch:
+                _add_entry(b_title, ch)
+
+    # 2. From covered_chapters if empty or supplemental
+    if not book_to_chaps and covered_chapters:
+        for item in covered_chapters:
+            s = clean_book_name(item)
+            if not s or is_non_content_title(s):
+                continue
+            if re.match(r"^(?:section|part)\s+\d+", s, re.I) and not re.search(r"\bchapter\b", s, re.I):
+                continue
+            if " - " in s:
+                parts = s.split(" - ", 1)
+                _add_entry(parts[0], parts[1])
+            elif ": " in s and not s.lower().startswith("chapter"):
+                parts = s.split(": ", 1)
+                _add_entry(parts[0], parts[1])
+            else:
+                _add_entry("", s)
+
+    if not book_to_chaps:
+        return ""
+
+    groups = []
+    for b_title, chaps in book_to_chaps.items():
+        ch_str = ", ".join(chaps)
+        if b_title and b_title != "Textbook":
+            groups.append(f"{b_title}: {ch_str}")
+        else:
+            groups.append(ch_str)
+    return "; ".join(groups)
+
+
 def _get_paper_header_values(
     questions: list[dict[str, Any]],
     totals_summary: Optional[dict[str, Any]] = None,
@@ -164,10 +232,11 @@ def create_docx_exam_paper(
     sub_run.bold = True
     sub_run.font.size = Pt(11)
 
-    if clean_covered:
+    header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
+    if header_covered_str:
         ch_p = doc.add_paragraph()
         ch_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {', '.join(clean_covered)}")
+        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {header_covered_str}")
         ch_run.font.size = Pt(9.5)
         ch_run.font.italic = True
         ch_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
@@ -690,8 +759,9 @@ def create_pdf_exam_paper(
     elements = []
     elements.append(Paragraph(institution_name.upper(), title_style))
     elements.append(Paragraph(f"Subject: {clean_course} ({subject_code})", sub_style))
-    if clean_covered:
-        elements.append(Paragraph(f"Syllabus / Covered Chapters: {', '.join(clean_covered)}", ch_style))
+    header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
+    if header_covered_str:
+        elements.append(Paragraph(f"Syllabus / Covered Chapters: {header_covered_str}", ch_style))
     elements.append(Spacer(1, 8))
 
     total_marks, q_count_text = _get_paper_header_values(questions, totals_summary)
