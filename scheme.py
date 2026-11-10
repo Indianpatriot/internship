@@ -619,3 +619,7 @@ def prefill_unit_sources(
     scheme["unit_sources"] = filled
     scheme["unit_mapping_meta"] = unit_meta
     return filled
+
+
+from retrieval.llm_mapper import auto_map_units_with_llm  # noqa: E402
+

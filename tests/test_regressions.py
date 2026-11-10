@@ -943,4 +943,53 @@ def test_change2_50_marks_paper_no_choice_ui_model():
     assert "OR" in paper_100_text
 
 
+def test_autofill_textbook_mapping_integration():
+    """Verify LLM auto-mapping integration: autofills unmapped units, preserves manual, and handles fallback."""
+    from generation.mock_client import MockClient
+    from retrieval.llm_mapper import auto_map_units_with_llm
+
+    lib = {
+        "books": {
+            "b1": {"title": "Operating Systems", "chapters": ["Chapter 1 Processes", "Chapter 2 Memory"]},
+            "b2": {"title": "Networking Concepts", "chapters": ["Chapter 1 Protocols", "Chapter 2 Routing"]},
+        },
+        "chunks": [
+            {"book_id": "b1", "chapter": "Chapter 1 Processes", "text": "A process is a program in execution with virtual memory and threads."},
+            {"book_id": "b2", "chapter": "Chapter 1 Protocols", "text": "TCP and UDP are transport layer protocols providing reliable or datagram delivery."},
+        ],
+    }
+
+    units = [
+        {"unit": 1, "title": "Process Scheduling", "topics": ["processes", "virtual memory"]},
+        {"unit": 2, "title": "Transport Layer", "topics": ["protocols", "tcp", "udp"]},
+        {"unit": 3, "title": "Unrelated Topic Without Book Match", "topics": ["quantum teleportation"]},
+    ]
+
+    client = MockClient()
+    # Unit 1 is manually mapped
+    manual_mapped = {1}
+    res = auto_map_units_with_llm(
+        units=units,
+        library=lib,
+        client=client,
+        min_confidence=0.50,
+        manually_mapped_units=manual_mapped,
+    )
+
+    # Unit 1 untouched
+    assert 1 not in res
+
+    # Unit 2 auto-suggested
+    assert 2 in res
+    assert res[2]["status"] == "auto_suggested"
+    assert "b2" in res[2]["chapters"]
+    assert "Chapter 1 Protocols" in res[2]["chapters"]["b2"]
+
+    # Unit 3 cannot be mapped confidently -> remains unmapped
+    assert 3 in res
+    assert res[3]["status"] == "unmapped"
+    assert res[3]["chapters"] == {}
+
+
+
 

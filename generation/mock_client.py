@@ -153,6 +153,10 @@ class MockClient:
         return True
 
     def generate(self, prompt, temperature=None, num_predict=120, format=None, **kwargs):
+        # Unit-to-chapter mapping prompt
+        if "map each unmapped syllabus unit" in prompt.lower() or "available textbook chapters" in prompt.lower():
+            return self._generate_unit_mapping(prompt)
+
         # Answer generation prompt
         if "Model Answer:" in prompt or "authoritative model answer" in prompt:
             return self._generate_answer(prompt)
@@ -224,3 +228,48 @@ class MockClient:
             return f"{primary_ans}\nOR\n{alt_ans}"
 
         return primary_ans
+
+    def _generate_unit_mapping(self, prompt: str) -> str:
+        """Mock structured JSON response for unit-to-chapter mapping."""
+        import json
+
+        ch_matches = re.findall(
+            r'- ID: "(C\d+)" \| Book: "([^"]+)" \| Chapter: "([^"]+)"(?: \| Overview: (.*?))?$',
+            prompt,
+            re.MULTILINE,
+        )
+        u_matches = re.findall(
+            r'- Unit (\d+): Title: "([^"]+)"(?: \| Topics: (.*?))?$',
+            prompt,
+            re.MULTILINE,
+        )
+
+        mappings = {}
+        for u_num_str, u_title, u_topics in u_matches:
+            u_text = f"{u_title} {u_topics}".lower()
+            u_words = set(re.findall(r"[a-z0-9]{3,}", u_text)) - {
+                "unit", "the", "and", "for", "with", "from", "general", "content"
+            }
+
+            best_cid = None
+            best_score = 0
+            for cid, book, chap, overview in ch_matches:
+                ch_text = f"{book} {chap} {overview}".lower()
+                ch_words = set(re.findall(r"[a-z0-9]{3,}", ch_text))
+                overlap = len(u_words & ch_words)
+                if overlap > best_score:
+                    best_score = overlap
+                    best_cid = cid
+
+            if best_cid and best_score >= 1:
+                mappings[u_num_str] = {
+                    "chapter_ids": [best_cid],
+                    "confidence": 0.92,
+                }
+            else:
+                mappings[u_num_str] = {
+                    "chapter_ids": [],
+                    "confidence": 0.10,
+                }
+
+        return json.dumps(mappings, indent=2)
