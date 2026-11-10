@@ -116,4 +116,4 @@ def select_chunks_for_unit(
                 if matched:
                     filtered.append(c)
 
-    return filtered if filtered else valid_chunks
+    return filtered

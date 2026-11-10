@@ -17,10 +17,20 @@ Implements the two-dimensional taxonomy framework:
 
 Contains the complete 4x6 matrix data with exemplar tasks from the reference framework.
 """
+import re
 from typing import Any, Optional
 
 # Knowledge Dimensions
 KNOWLEDGE_DIMENSIONS = ["Factual", "Conceptual", "Procedural", "Metacognitive"]
+
+ALLOWED_KDS_BY_LEVEL: dict[str, list[str]] = {
+    "L1": ["Factual", "Conceptual"],
+    "L2": ["Conceptual", "Factual"],
+    "L3": ["Procedural", "Conceptual"],
+    "L4": ["Conceptual", "Procedural", "Metacognitive"],
+    "L5": ["Conceptual", "Procedural", "Metacognitive"],
+    "L6": ["Conceptual", "Procedural", "Metacognitive"],
+}
 
 KNOWLEDGE_DIMENSION_DESCRIPTIONS = {
     "Factual": (
@@ -253,4 +263,71 @@ def compute_2d_taxonomy_matrix(slots_or_questions: list[dict[str, Any]]) -> dict
             matrix[kd][lvl] += 1
 
     return matrix
+
+
+def infer_knowledge_dimension(
+    question: str,
+    level: Optional[str] = None,
+    answer: Optional[str] = None,
+) -> str:
+    """Infer the Knowledge Dimension (Factual, Conceptual, Procedural, Metacognitive)
+    of an exam question using dynamic 2D BT x KD analysis of verbs, question patterns,
+    stem keywords, and answer structure.
+    """
+    q = (question or "").strip()
+    if not q:
+        return "Conceptual"
+
+    q_low = q.lower()
+    from blooms.verb_bank import first_word, normalize_level
+    fw = first_word(q).lower()
+    norm_lvl = normalize_level(level) if level else None
+    ans_low = (answer or "").lower()
+
+    # 1. Metacognitive signals (reflection, strategic justification, evaluating trade-offs, defending choices)
+    if (
+        re.search(r"\bjustify\s+(?:the|your)?\s*(?:choice|recommendation|decision|selection|strategy)\b", q_low)
+        or re.search(r"\bchoose\s+between\b.*\band\s+defend\b", q_low)
+        or re.search(r"\b(?:assess\s+and\s+justify|evaluate\s+a\s+strategy|strategic\s+trade-offs?)\b", q_low)
+        or fw in ("justify", "recommend", "defend", "reflect")
+        or ("verdict" in ans_low and "justification" in ans_low and "trade-offs" in ans_low)
+    ):
+        return "Metacognitive"
+
+    # 2. Procedural signals (steps, algorithms, code modification, calculations, commands, workflows)
+    if (
+        re.search(r"\b(?:outline|describe|state|explain)\s+the\s+steps\b", q_low)
+        or re.search(r"\b(?:step-by-step|procedure\s+to|procedure\s+for|workflow\s+to)\b", q_low)
+        or re.search(r"\bmodify\s+(?:the\s+)?code\b", q_low)
+        or fw in ("modify", "calculate", "compute", "solve", "implement", "execute", "demonstrate")
+        or re.search(r"\b(?:docker\s+run|kubectl|cli\s+command|apk\s+add|apt-get)\b", q_low)
+        or ("step 1" in ans_low and "step 2" in ans_low)
+    ):
+        return "Procedural"
+
+    # 3. Conceptual signals (explanations, comparisons, distinctions, classifications, models, theories)
+    if (
+        re.search(r"\b(?:distinguish|contrast|compare|differentiate|classify|paraphrase)\b", q_low)
+        or fw in ("explain", "distinguish", "contrast", "paraphrase", "classify", "compare", "differentiate")
+        or re.search(r"\bhow\s+.*\b(?:functions|operates|interacts|behaves)\b", q_low)
+        or re.search(r"\b(?:difference\s+between|relationship\s+between|architectural\s+model)\b", q_low)
+    ):
+        return "Conceptual"
+
+    # 4. Factual signals (direct recall of terms, definitions, symbols, lists)
+    if (
+        fw in ("name", "define", "list", "state", "identify", "recall", "label", "enumerate", "mention")
+        or re.search(r"\b(?:what\s+is\s+the\s+term|state\s+the\s+definition|list\s+the\s+properties)\b", q_low)
+    ):
+        return "Factual"
+
+    # 5. Level-based fallback if stem is ambiguous
+    if norm_lvl == "L1":
+        return "Factual"
+    elif norm_lvl == "L3":
+        return "Procedural"
+    elif norm_lvl in ("L5", "L6"):
+        return "Conceptual"
+
+    return "Conceptual"
 

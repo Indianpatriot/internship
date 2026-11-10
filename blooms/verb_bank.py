@@ -81,7 +81,7 @@ def validate_question(question, level, min_words=5, max_words=80):
 KD_BLOOM_VERBS: dict[tuple[str, str], list[str]] = {
     # Factual Knowledge: basic elements, terminology, specific details (state, list, name, define, describe)
     ("L1", "Factual"): ["name", "define", "list", "state", "identify", "recall", "label", "enumerate", "mention", "select"],
-    ("L2", "Factual"): ["describe", "summarize", "paraphrase", "clarify", "express", "explain"],
+    ("L2", "Factual"): ["describe", "summarize", "clarify", "express", "outline"],
     ("L3", "Factual"): ["show", "respond", "provide"],
     ("L4", "Factual"): ["categorize", "relate"],
     ("L5", "Factual"): ["check", "determine"],
@@ -89,7 +89,7 @@ KD_BLOOM_VERBS: dict[tuple[str, str], list[str]] = {
 
     # Conceptual Knowledge: interrelationships, classifications, models, theories (explain, classify, compare)
     ("L1", "Conceptual"): ["recognize", "match", "identify", "recall"],
-    ("L2", "Conceptual"): ["explain", "classify", "summarize", "interpret", "describe", "discuss", "clarify"],
+    ("L2", "Conceptual"): ["explain", "classify", "summarize", "interpret", "paraphrase", "describe", "discuss", "clarify"],
     ("L3", "Conceptual"): ["illustrate", "demonstrate", "show", "apply"],
     ("L4", "Conceptual"): ["analyze", "distinguish", "contrast", "compare", "differentiate", "examine", "categorize", "relate"],
     ("L5", "Conceptual"): ["evaluate", "determine", "judge", "assess", "appraise"],
@@ -110,6 +110,37 @@ KD_BLOOM_VERBS: dict[tuple[str, str], list[str]] = {
     ("L4", "Metacognitive"): ["deconstruct", "analyze", "examine", "relate", "integrate"],
     ("L5", "Metacognitive"): ["justify", "recommend", "evaluate", "reflect", "defend", "critique", "prioritize", "argue"],
     ("L6", "Metacognitive"): ["devise", "plan", "formulate", "create", "propose"],
+}
+
+KD_QUESTION_PATTERNS: dict[str, list[str]] = {
+    "Factual": [
+        "State the definition of...",
+        "List the core components of...",
+        "Define the term...",
+        "Name the primary attributes of...",
+        "Identify the key characteristics of...",
+    ],
+    "Conceptual": [
+        "Explain how... functions within the system?",
+        "Distinguish between... and...?",
+        "Compare and contrast... with...?",
+        "Classify the types of... based on...",
+        "Paraphrase the concept of...",
+    ],
+    "Procedural": [
+        "Outline the steps to configure/implement...",
+        "Demonstrate the procedure for...",
+        "Implement an algorithm/workflow to...",
+        "Modify the configuration/code to...",
+        "Apply the method to solve...",
+    ],
+    "Metacognitive": [
+        "Justify the recommendation of... over...?",
+        "Evaluate the strategic trade-offs of...",
+        "Reflect on the design decisions and justify...",
+        "Choose between alternative approaches and defend the choice?",
+        "Critique the strategy used for...",
+    ],
 }
 
 
@@ -203,7 +234,7 @@ def replace_question_verb(question: str, new_verb: str) -> str:
 
 
 def correct_stem_verb_for_kd(question: str, level: str, kd: str) -> tuple[str, bool, str]:
-    """Check if the question's leading verb conforms to (level, kd).
+    """Check if the question's leading verb and pattern conform to (level, kd).
     If mismatched, replace with the appropriate allowed verb and adjust stem minimally.
     Returns (rewritten_question, was_corrected, log_message).
     """
@@ -213,6 +244,58 @@ def correct_stem_verb_for_kd(question: str, level: str, kd: str) -> tuple[str, b
     norm_lvl = normalize_level(level)
     norm_kd = normalize_knowledge_dimension(kd)
     fw = first_word(question).strip().lower()
+    q = question.strip()
+
+    # 1. Structural pattern mismatches (checked before pure verb allowance)
+
+    # 1a. Conceptual KD pattern fixes
+    if norm_kd == "Conceptual":
+        # Procedural pattern: "Describe the steps", "Outline the steps"
+        if re.match(r"^(?:Describe|Outline|State|List)\s+the\s+steps\b", q, re.I):
+            new_q = re.sub(r"^(?:Describe|Outline|State|List)\s+the\s+steps\s+(?:of|to|for)\b", "Explain the process of", q, count=1, flags=re.I)
+            if new_q == q:
+                new_q = re.sub(r"^(?:Describe|Outline|State|List)\s+the\s+steps\b", "Explain the process of", q, count=1, flags=re.I)
+            return new_q, True, "Conceptual correction: 'Describe/Outline the steps' -> 'Explain the process of'"
+
+        # Procedural pattern: "Modify code / modify the code"
+        if re.match(r"^Modify\s+(?:the\s+)?code\b", q, re.I):
+            new_q = re.sub(r"^Modify\s+(?:the\s+)?code\s+(?:in|for|to)?\b", "Explain how to adapt", q, count=1, flags=re.I)
+            return new_q, True, "Conceptual correction: 'Modify code' -> 'Explain how to adapt'"
+
+        # Procedural pattern: "Calculate / compute"
+        if re.match(r"^(?:Calculate|Compute)\b", q, re.I):
+            new_q = re.sub(r"^(?:Calculate|Compute)\b", "Explain the factors determining", q, count=1, flags=re.I)
+            return new_q, True, "Conceptual correction: 'Calculate' -> 'Explain the factors determining'"
+
+    # 1b. Procedural KD pattern fixes
+    elif norm_kd == "Procedural":
+        # Metacognitive pattern: "Assess and justify", "Evaluate and justify", "Justify"
+        if re.match(r"^(?:Assess\s+and\s+justify|Evaluate\s+and\s+justify|Justify)\b", q, re.I):
+            new_q = re.sub(r"^(?:Assess\s+and\s+justify|Evaluate\s+and\s+justify|Justify)\b", "Validate the procedural efficiency of", q, count=1, flags=re.I)
+            return new_q, True, "Procedural correction: 'Assess and justify' -> 'Validate the procedural efficiency of'"
+
+        # Conceptual pattern: "Distinguish between", "Contrast"
+        if re.match(r"^(?:Distinguish|Contrast)\b", q, re.I):
+            if norm_lvl in ("L4", "L5", "L6"):
+                cand = "Differentiate"
+                new_q = replace_question_verb(q, cand)
+                return new_q, True, f"Procedural correction: '{fw.capitalize()}' -> '{cand}'"
+            else:
+                new_q = re.sub(r"^(?:Distinguish|Contrast)\s+(?:between\s+)?", "Outline the steps to differentiate between ", q, count=1, flags=re.I)
+                return new_q, True, "Procedural correction: 'Distinguish/Contrast' -> 'Outline the steps to differentiate between'"
+
+    # 1c. Metacognitive KD pattern fixes
+    elif norm_kd == "Metacognitive":
+        # Conceptual pattern: "Compare Helm and Kustomize"
+        if re.match(r"^(?:Compare|Contrast)\b", q, re.I):
+            new_q = re.sub(r"^(?:Compare|Contrast)\b", "Evaluate and justify the trade-offs between", q, count=1, flags=re.I)
+            return new_q, True, "Metacognitive correction: 'Compare/Contrast' -> 'Evaluate and justify the trade-offs between'"
+
+    # 1d. Factual KD pattern fixes
+    elif norm_kd == "Factual":
+        if re.match(r"^Paraphrase\b", q, re.I):
+            new_q = replace_question_verb(q, "State")
+            return new_q, True, "Factual correction: 'Paraphrase' -> 'State'"
 
     # Check if already allowed
     if is_verb_allowed_for_kd(fw, norm_lvl, norm_kd):

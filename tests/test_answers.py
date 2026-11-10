@@ -1,5 +1,11 @@
 """Tests for Model Answer Generation and Grounding (Task 2)."""
-from generation.generator import generate_answer, generate_paper_by_slots
+from generation.generator import (
+    check_or_twin_answer_depth_parity,
+    extract_scheme_points_and_marks,
+    generate_answer,
+    generate_paper_by_slots,
+    validate_evaluation_scheme,
+)
 from generation.mock_client import MockClient
 
 
@@ -86,3 +92,147 @@ def test_grounded_check_rejects_unrelated_answer():
     ans_rec = generate_answer(q, chunk, marks=5, client=client, check_similarity=True)
     assert ans_rec["valid"] is False
     assert "similarity" in ans_rec["reason"]
+
+
+def test_scheme_validation_point_sum_and_single_sentence():
+    """PART D: Verify marking scheme validators enforce sum(points) == marks and reject single sentence answers."""
+    # 1. Single sentence rejected for 5 marks
+    ok, msg, flags = validate_evaluation_scheme("Docker containers share the host Linux kernel for isolation.", marks=5)
+    assert ok is False
+    assert "single-sentence" in msg
+    assert "RUBRIC" in flags
+
+    # 2. Sum mismatch rejected
+    bad_split = (
+        "Point 1 (2M): Containers share the host OS kernel.\n"
+        "Point 2 (2M): Namespaces isolate process execution.\n"
+        "Point 3 (2M): Cgroups constrain memory usage."
+    )
+    ok, msg, flags = validate_evaluation_scheme(bad_split, marks=5)
+    assert ok is False
+    assert "sum 6 != expected 5M" in msg
+    assert "RUBRIC" in flags
+
+    # 3. Exact sum accepted
+    good_split = (
+        "Point 1 (2M): Containers share the host OS kernel.\n"
+        "Point 2 (2M): Namespaces isolate process execution.\n"
+        "Point 3 (1M): Cgroups constrain memory usage."
+    )
+    ok, msg, flags = validate_evaluation_scheme(good_split, marks=5)
+    assert ok is True
+    assert msg == "ok"
+
+
+def test_scheme_validation_minimum_points_rule():
+    """PART D: Marks >= 5 requires at least ceil(marks / 2) points."""
+    # 5 marks requires ceil(5/2) = 3 points. 2 points fails.
+    two_points = (
+        "Point 1 (3M): Containers share the host OS kernel.\n"
+        "Point 2 (2M): Namespaces isolate process execution."
+    )
+    ok, msg, flags = validate_evaluation_scheme(two_points, marks=5)
+    assert ok is False
+    assert "below minimum 3" in msg
+
+    # 10 marks requires ceil(10/2) = 5 points
+    four_points_10m = (
+        "Point 1 (3M): First point.\n"
+        "Point 2 (3M): Second point.\n"
+        "Point 3 (2M): Third point.\n"
+        "Point 4 (2M): Fourth point."
+    )
+    ok, msg, flags = validate_evaluation_scheme(four_points_10m, marks=10, level="L2")
+    assert ok is False
+    assert "below minimum 5" in msg
+
+
+def test_scheme_validation_l5_l6_rubrics():
+    """PART D: L5 and L6 answers must adhere to structured evaluation or creation rubrics."""
+    # L5 without criteria/verdict/justification/tradeoffs fails
+    plain_l5 = (
+        "Point 1 (2M): Option A performs fast.\n"
+        "Point 2 (2M): Option B consumes more memory.\n"
+        "Point 3 (1M): Both options are valid."
+    )
+    ok, msg, flags = validate_evaluation_scheme(plain_l5, marks=5, level="L5")
+    assert ok is False
+    assert "rubric" in msg.lower()
+    assert "RUBRIC" in flags
+
+    # L5 with structured rubric passes
+    structured_l5 = (
+        "Criteria (2M): Scalability, fault-tolerance, and latency benchmarks.\n"
+        "Verdict (1M): Kubernetes stateful sets are superior for database persistence.\n"
+        "Justification (1M): Automated failover and persistent volume claims ensure data durability.\n"
+        "Trade-offs (1M): Increased control-plane complexity compared to standalone pods."
+    )
+    ok, msg, _ = validate_evaluation_scheme(structured_l5, marks=5, level="L5")
+    assert ok is True
+
+    # L6 with structured creation rubric passes
+    structured_l6 = (
+        "Architecture / Plan Steps (2M): Define modular microservices with ingress controllers.\n"
+        "Rationale (2M): Decouples deployment velocity and isolates resource contention.\n"
+        "Trade-offs (1M): Requires distributed tracing to monitor inter-service latency."
+    )
+    ok, msg, _ = validate_evaluation_scheme(structured_l6, marks=5, level="L6")
+    assert ok is True
+
+
+def test_mock_client_outputs_itemized_points_and_exact_sum():
+    """PART D: MockClient answers are itemized with mark splits exactly summing to marks."""
+    client = MockClient()
+    chunk = _sample_chunk()
+
+    # 5-mark answer
+    ans_5 = generate_answer("Explain AVL tree rotations?", chunk, marks=5, client=client, level="L2")
+    assert ans_5["valid"] is True
+    pts_5, marks_5 = extract_scheme_points_and_marks(ans_5["answer"])
+    assert len(pts_5) >= 3  # ceil(5/2) = 3
+    assert sum(marks_5) == 5
+
+    # 10-mark L5 answer
+    ans_10_l5 = generate_answer("Evaluate AVL trees versus Red-Black trees?", chunk, marks=10, client=client, level="L5")
+    assert ans_10_l5["valid"] is True
+    pts_10, marks_10 = extract_scheme_points_and_marks(ans_10_l5["answer"])
+    assert sum(marks_10) == 10
+    assert any("criteria" in p.lower() for p in pts_10)
+    assert any("verdict" in p.lower() for p in pts_10)
+
+    # 10-mark L6 answer
+    ans_10_l6 = generate_answer("Design an auto-balancing indexing tree structure?", chunk, marks=10, client=client, level="L6")
+    assert ans_10_l6["valid"] is True
+    pts_l6, marks_l6 = extract_scheme_points_and_marks(ans_10_l6["answer"])
+    assert sum(marks_l6) == 10
+    assert any("plan" in p.lower() or "architecture" in p.lower() for p in pts_l6)
+
+
+def test_or_twin_answer_depth_parity():
+    """PART D: Disparity in answer depth between OR twins triggers RUBRIC review flag."""
+    questions = [
+        {
+            "id": "1(a)",
+            "unit": 1,
+            "alternative_group": "U1_A",
+            "marks": 10,
+            "answer": "Point 1 (2M): Short answer text only here.",
+        },
+        {
+            "id": "2(a)",
+            "unit": 1,
+            "alternative_group": "U1_B",
+            "marks": 10,
+            "answer": (
+                "Point 1 (2M): Extremely comprehensive detailed analysis of algorithms with extensive proof.\n"
+                "Point 2 (2M): Thorough discussion of time complexity and execution bounds.\n"
+                "Point 3 (2M): Space overhead exploration in hardware registers.\n"
+                "Point 4 (2M): Comparison benchmarks across diverse data distribution datasets.\n"
+                "Point 5 (2M): Concrete real-world production engineering deployment recommendations."
+            ),
+        },
+    ]
+    disparities = check_or_twin_answer_depth_parity(questions)
+    assert len(disparities) == 1
+    assert "RUBRIC: answer depth disparity" in disparities[0][2]
+

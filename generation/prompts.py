@@ -44,9 +44,13 @@ KNOWLEDGE_HINTS = {
 }
 
 MARKS_HINTS = {
-    2: " Keep it short; answerable in 2-3 sentences.",
-    5: " It should be answerable in one well-developed paragraph.",
-    10: " It should need a detailed, multi-point answer.",
+    2: " Scope the question appropriately for 2 marks (keep it short; answerable in 2-3 sentences).",
+    3: " Scope the question appropriately for 3 marks (ask for 2-3 key points or a short clear description).",
+    4: " Scope the question appropriately for 4 marks (ask for 2-3 specific features, steps, or aspects).",
+    5: " Scope the question appropriately for 5 marks (ask for 3 specific key points, components, or steps; answerable in one well-developed paragraph).",
+    6: " Scope the question appropriately for 6 marks (ask for 3-4 distinct points, mechanisms, or trade-offs).",
+    8: " Scope the question appropriately for 8 marks (ask for 4 distinct points, components, or in-depth analytical aspects).",
+    10: " Scope the question appropriately for 10 marks (ask for 5 distinct points, comprehensive architectural breakdown, or detailed end-to-end steps; detailed multi-point answer).",
 }
 
 
@@ -83,15 +87,19 @@ def build_prompt(
 
 
 ANSWER_BASE = """You are an expert exam evaluator and question paper author.
-Provide an authoritative model answer for the exam question below using ONLY the provided context.
+Provide an authoritative model answer and itemized evaluation scheme for the exam question below using ONLY the provided context.
 
 Rules:
 - Answer ONLY from the context. Do not use outside knowledge or extrapolate beyond the text. State only verified facts from the context; a question's false premise must not be accepted.
-- For term recall questions (e.g. 'Identify the term...', 'Name the term...'), provide ONLY the short precise term/name (under 8 words) without repeating or echoing the question stem.
-{strict_rule}- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated"), and do not invent contradictory alternatives. Write the exact answer an examiner expects.
-- The model answer must be completely self-contained. NEVER write phrases such as "according to the provided context", "in the provided example", "as shown in Listing", "as described in the passage", "introductory chapter", "earlier chapter", "in this chapter", "in this book", "the author", or local file paths (e.g. /home/..., C:\\Users\\...).
-- Address all parts of the question directly (such as trade-offs, advantages, consequences, steps, or justification).
-- Target answer length: approximately {target_words} words (appropriate for a {marks}-mark question).
+- For term recall questions (e.g. 'Identify the term...', 'Name the term...'), provide ONLY the short precise term/name without repeating the question stem.
+- For questions of {marks} marks, format the model answer as itemized key points with allocated marks summing up EXACTLY to {marks} marks:
+  Point 1 (<mark>M): <technical explanation>
+  Point 2 (<mark>M): <technical explanation>
+{rubric_rule}- Minimum number of distinct points: {min_points} points. Never provide a single unbroken block or single sentence for questions of 5 or more marks.
+{strict_rule}- Provide ONE clear, correct, authoritative model answer. Do not apologize, do not comment on what the context lacks (e.g. NEVER write "the text does not mention" or "not explicitly stated").
+- The model answer must be completely self-contained. NEVER write phrases such as "according to the provided context", "in the provided example", "as shown in Listing", "as described in the passage", "introductory chapter", "earlier chapter", "in this chapter", "in this book", "the author", or local file paths.
+- Address all parts of the question directly (trade-offs, advantages, consequences, steps, or justification).
+- Target answer length: approximately {target_words} words.
 - If multiple valid approaches exist, label them clearly with "Alternative approach:". NEVER use "OR" or "― OR ―" inside the answer text.
 - Output only the model answer text. No conversational preamble, no greetings, no markdown fences.
 
@@ -110,11 +118,32 @@ def build_answer_prompt(
     question: str,
     context: str,
     marks: Optional[int] = None,
+    level: Optional[str] = None,
     strict_grounding: bool = False,
 ) -> str:
     """Build prompt for generating a grounded model answer."""
     m = marks if marks is not None and marks > 0 else 5
     target_words = max(30, min(500, m * 25))
+    min_points = max(2, (m + 1) // 2) if m >= 5 else 1
+
+    rubric_rule = ""
+    norm_lvl = normalize_level(level) if level else None
+    if norm_lvl == "L5":
+        rubric_rule = (
+            f"- For this L5 (Evaluate) question, structure the marking scheme as an evaluation rubric summing to {m}M:\n"
+            "  1. Criteria (<mark>M): Technical benchmarks or evaluation standards from the context.\n"
+            "  2. Verdict (<mark>M): Clear evaluative judgment or assessment.\n"
+            "  3. Justification (<mark>M): Technical evidence from the context justifying the verdict.\n"
+            "  4. Trade-offs / Limitations (<mark>M): System constraints, edge cases, or counterarguments.\n"
+        )
+    elif norm_lvl == "L6":
+        rubric_rule = (
+            f"- For this L6 (Create/Design) question, structure the marking scheme as a design rubric summing to {m}M:\n"
+            "  1. Architecture / Plan Steps (<mark>M): Step-by-step technical plan or design specification.\n"
+            "  2. Rationale (<mark>M): Technical reasons and justification for the proposed architecture.\n"
+            "  3. Trade-offs / Limitations (<mark>M): Design trade-offs, edge cases, or boundary conditions.\n"
+        )
+
     strict_rule = (
         "- STRICT GROUNDING: Answer strictly and only from the provided context. Do not invent facts, claims, or tools. "
         "Every statement must be directly verifiable in the context.\n"
@@ -124,6 +153,8 @@ def build_answer_prompt(
     return ANSWER_BASE.format(
         target_words=target_words,
         marks=m,
+        min_points=min_points,
+        rubric_rule=rubric_rule,
         strict_rule=strict_rule,
         context=context.strip(),
         question=question.strip(),

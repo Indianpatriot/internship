@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import config
 from blooms.revised_taxonomy import (
+    ALLOWED_KDS_BY_LEVEL,
     KNOWLEDGE_DIMENSIONS,
     compute_2d_taxonomy_matrix,
     normalize_knowledge_dimension,
@@ -475,14 +476,7 @@ def build_blueprint(
 
     band_level_alternation = {b: 0 for b in BT_BANDS}
 
-    KD_BY_LEVEL = {
-        "L1": ["Factual", "Conceptual"],
-        "L2": ["Conceptual", "Factual"],
-        "L3": ["Procedural", "Conceptual"],
-        "L4": ["Conceptual", "Procedural"],
-        "L5": ["Conceptual", "Procedural", "Metacognitive"],
-        "L6": ["Conceptual", "Procedural", "Metacognitive"],
-    }
+    KD_BY_LEVEL = ALLOWED_KDS_BY_LEVEL
 
     for s in sorted_slots:
         m = s["marks"]

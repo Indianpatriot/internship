@@ -18,4 +18,6 @@ from blooms.revised_taxonomy import (  # noqa: F401
     compute_2d_taxonomy_matrix,
     get_taxonomy_cell,
     normalize_knowledge_dimension,
+    ALLOWED_KDS_BY_LEVEL,
+    infer_knowledge_dimension,
 )

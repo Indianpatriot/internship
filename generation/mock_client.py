@@ -1,5 +1,7 @@
 """Offline stand-in for the LLM (tests / demo without Ollama)."""
 import re
+from typing import Optional
+from generation.ollama_client import OllamaTimeoutError, OllamaConnectionError
 
 
 def _extract_concept(ctx: str) -> str:
@@ -149,10 +151,35 @@ def _format_question_with_verb(verb: str, concept: str) -> str:
 class MockClient:
     model = "mock"
 
+    def __init__(self, fail_mode: Optional[str] = None, fail_pattern: Optional[str] = None):
+        self.fail_mode = fail_mode
+        self.fail_pattern = fail_pattern
+        self.call_history: list[dict] = []
+
     def is_up(self):
-        return True
+        return self.fail_mode != "connection"
 
     def generate(self, prompt, temperature=None, num_predict=120, format=None, **kwargs):
+        # 1. Failure-injection modes
+        if self.fail_pattern and self.fail_pattern in prompt:
+            raise RuntimeError(f"Simulated failure for pattern '{self.fail_pattern}'")
+
+        if self.fail_mode == "timeout":
+            raise OllamaTimeoutError("Simulated Ollama request timeout")
+        elif self.fail_mode == "connection":
+            raise OllamaConnectionError("Simulated Ollama connection failure")
+        elif self.fail_mode == "empty":
+            return ""
+        elif self.fail_mode == "bad_json":
+            raise ValueError("JSON parse error: model returned invalid JSON")
+        elif self.fail_mode == "ungrounded" and ("Model Answer:" in prompt or "authoritative model answer" in prompt):
+            return (
+                "Point 1 (3M): Quantum entanglement teleports subatomic particles through non-local wormholes. "
+                "Point 2 (2M): Superconducting tachyons manipulate hyper-dimensional space-time manifolds."
+            )
+        elif self.fail_mode == "bloom_verb_fail" and not ("Model Answer:" in prompt or "authoritative model answer" in prompt):
+            return "Predict the cosmological future evolution of quantum entanglement?"
+
         # Unit-to-chapter mapping prompt
         if "map each unmapped syllabus unit" in prompt.lower() or "available textbook chapters" in prompt.lower():
             return self._generate_unit_mapping(prompt)
@@ -180,8 +207,13 @@ class MockClient:
         q_match = re.search(r"Question:\s*\n(.*?)(?:\n\s*Model Answer:|$)", prompt, re.S)
         question = q_match.group(1).strip() if q_match else ""
 
-        m_match = re.search(r"(\d+)-mark", prompt)
+        m_match = re.search(r"(\d+)-mark", prompt) or re.search(r"for questions of (\d+) marks", prompt, re.I)
         marks = int(m_match.group(1)) if m_match else 5
+
+        lvl_match = re.search(r"Bloom's\s*(L[1-6])", prompt) or re.search(r"L([1-6])\s*\(", prompt) or re.search(r"\b(L[1-6])\b", prompt)
+        level = lvl_match.group(1) if lvl_match else "L2"
+        if not level.startswith("L"):
+            level = f"L{level}"
 
         raw_sents = [s.strip() for s in re.split(r"[\.\n]+", ctx) if len(s.strip().split()) >= 3]
         cleaned_sents = []
@@ -200,33 +232,85 @@ class MockClient:
         elif not raw_sents:
             raw_sents = ["The technical system operates according to foundational computational principles."]
 
-        # Target words scale strictly with marks
-        target_words = max(20, min(400, marks * 22))
-        words_accum: list[str] = []
-        idx = 0
-        while len(words_accum) < target_words:
-            sent = raw_sents[idx % len(raw_sents)] + "."
-            words_accum.extend(sent.split())
-            idx += 1
-            if idx > 30:
-                break
+        def _make_structured_answer(sents: list[str], target_marks: int, offset: int = 0) -> str:
+            # Term question under 4 marks
+            if target_marks <= 2:
+                s1 = sents[offset % len(sents)]
+                s2 = sents[(offset + 1) % len(sents)]
+                return f"Point 1 (1M): {s1}.\nPoint 2 (1M): {s2}."
 
-        primary_ans = " ".join(words_accum)
+            # Structured Rubric for L5 (Evaluate)
+            if level == "L5":
+                if target_marks <= 5:
+                    splits = [("Criteria", 2), ("Verdict", 1), ("Justification", 1), ("Trade-offs", 1)]
+                elif target_marks <= 8:
+                    rem = target_marks - 6
+                    splits = [("Criteria", 2), ("Verdict", 2), ("Justification", 2 + rem), ("Trade-offs", 2)]
+                else:
+                    base = target_marks // 5
+                    rem = target_marks % 5
+                    splits = [
+                        ("Criteria", base + (1 if rem > 0 else 0)),
+                        ("Verdict", base + (1 if rem > 1 else 0)),
+                        ("Justification", base + (1 if rem > 2 else 0)),
+                        ("System Trade-offs", base + (1 if rem > 3 else 0)),
+                        ("Operational Limitations", base),
+                    ]
+                pts = [f"{name} ({p_pts}M): {sents[(offset + i) % len(sents)]}." for i, (name, p_pts) in enumerate(splits)]
+                return "\n".join(pts)
+
+            # Structured Rubric for L6 (Create/Design)
+            if level == "L6":
+                if target_marks <= 5:
+                    splits = [("Architecture / Plan Steps", 2), ("Rationale", 2), ("Trade-offs", 1)]
+                elif target_marks <= 8:
+                    rem = target_marks - 6
+                    splits = [("Architecture / Plan Steps", 2), ("Implementation Steps", 2), ("Rationale", 2), ("Trade-offs", rem)]
+                else:
+                    base = target_marks // 5
+                    rem = target_marks % 5
+                    splits = [
+                        ("Architectural Blueprint", base + (1 if rem > 0 else 0)),
+                        ("Step-by-Step Implementation Plan", base + (1 if rem > 1 else 0)),
+                        ("Component Interactions", base + (1 if rem > 2 else 0)),
+                        ("Technical Rationale", base + (1 if rem > 3 else 0)),
+                        ("Design Trade-offs", base),
+                    ]
+                pts = [f"{name} ({p_pts}M): {sents[(offset + i) % len(sents)]}." for i, (name, p_pts) in enumerate(splits)]
+                return "\n".join(pts)
+
+            # Standard levels (L1 - L4)
+            num_points = max(2, (target_marks + 1) // 2)
+            base_pts = target_marks // num_points
+            remainder = target_marks % num_points
+
+            # Check demand keywords in question to satisfy check_demand_coverage
+            q_low = question.lower()
+            demand_prefix = ""
+            if "trade-off" in q_low or "tradeoff" in q_low:
+                demand_prefix = "Trade-offs and advantages indicate that "
+            elif "difference" in q_low or "distinguish" in q_low:
+                demand_prefix = "Key operational differences reveal that "
+            elif "step" in q_low:
+                demand_prefix = "Step-by-step procedure: "
+            elif "justify" in q_low:
+                demand_prefix = "Justification based on system behavior: "
+
+            pts = []
+            for i in range(num_points):
+                p_m = base_pts + (1 if i < remainder else 0)
+                sent = sents[(offset + i) % len(sents)]
+                prefix = demand_prefix if (i == 1 and demand_prefix) else ""
+                pts.append(f"Point {i + 1} ({p_m}M): {prefix}{sent}.")
+            return "\n".join(pts)
+
+        primary_ans = _make_structured_answer(raw_sents, marks, offset=0)
 
         q_lower = question.lower()
         has_or = any(w in q_lower for w in ["compare", "contrast", "differentiate", "distinguish", "alternative", " or "]) or "or" in q_lower.split()
 
         if has_or and len(raw_sents) >= 2:
-            alt_words_target = max(15, min(200, marks * 15))
-            alt_accum: list[str] = []
-            idx = 1
-            while len(alt_accum) < alt_words_target:
-                sent = raw_sents[idx % len(raw_sents)] + "."
-                alt_accum.extend(sent.split())
-                idx += 1
-                if idx > 20:
-                    break
-            alt_ans = " ".join(alt_accum)
+            alt_ans = _make_structured_answer(raw_sents, marks, offset=1)
             return f"{primary_ans}\nOR\n{alt_ans}"
 
         return primary_ans

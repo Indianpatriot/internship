@@ -9,7 +9,8 @@ Implements Paper Assembly & Export (Step 2 of UI and Export requirements):
 """
 import io
 import re
-from typing import Any, Optional
+import xml.sax.saxutils as saxutils
+from typing import Any, Optional, Union
 
 import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -24,10 +25,12 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import (
     PageBreak,
     Paragraph,
+    Preformatted,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
+    XPreformatted,
 )
 
 from ingestion.heading_detect import is_non_content_title
@@ -51,6 +54,22 @@ def clean_book_name(name: str) -> str:
         s = re.sub(r"^chapter:\s*", "Section: ", s, flags=re.IGNORECASE)
     elif re.match(r"^pages\s+\d+", s, re.IGNORECASE):
         s = f"Section: {s}"
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def clean_course_title(title: str) -> str:
+    """Clean course title or book concatenation for headers (e.g. 1_Docker_in_Practice_&_2_Kubernetes_in_Action)."""
+    if not title:
+        return "Course Assessment"
+    s = str(title).strip()
+    s = re.sub(r"^[•*–—\-]\s*", "", s).strip()
+    s = re.sub(r"\.pdf$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"_Exam_Paper$", "", s, flags=re.IGNORECASE).strip()
+    # Strip numeric prefixes in concatenated book titles like 1_Docker... & 2_Kubernetes...
+    s = re.sub(r"^\(?\d+\)?[_\.\-\s]+", "", s).strip()
+    s = re.sub(r"([&_\s]+)\(?\d+\)?[_\.\-\s]+", r"\1", s).strip()
+    if "_" in s and " " not in s:
+        s = s.replace("_", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -196,6 +215,155 @@ def _split_answer_alternatives(q: dict[str, Any]) -> list[str]:
     return cleaned_alts if cleaned_alts else ([q.get("answer", "").strip()] if q.get("answer") else [])
 
 
+def safe_xml_text(text: Any) -> str:
+    """Safely escape text for ReportLab Paragraphs, converting inline `code` to Courier font."""
+    if text is None:
+        return ""
+    s = str(text)
+    escaped = saxutils.escape(s)
+    escaped = re.sub(r"`([^`]+)`", lambda m: f'<font name="Courier">{m.group(1)}</font>', escaped)
+    escaped = escaped.replace("\n", "<br/>")
+    return escaped
+
+
+def format_pdf_cell_content(
+    text: Any,
+    default_style: ParagraphStyle,
+    code_style: Optional[ParagraphStyle] = None,
+) -> Any:
+    """Format table cell or document block for ReportLab.
+    If text contains multi-line markdown code blocks (```...```),
+    splits into Paragraphs and XPreformatted flowables, preserving exact newlines and indentation.
+    Bracketed tokens (<container-id>) and inline code are safely preserved.
+    """
+    if text is None:
+        return Paragraph("", default_style)
+    s = str(text)
+    if "```" not in s:
+        return Paragraph(safe_xml_text(s), default_style)
+
+    parts = re.split(r"```(?:\w+)?\n?(.*?)```", s, flags=re.DOTALL)
+    flowables = []
+    c_style = code_style or ParagraphStyle(
+        "PDFCodeBlock",
+        parent=default_style,
+        fontName="Courier",
+        fontSize=max(7.5, default_style.fontSize - 1),
+        leading=max(9.5, default_style.leading - 1),
+        textColor=colors.HexColor("#0F172A"),
+    )
+
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        if i % 2 == 1:
+            # Code block: preserve newlines
+            flowables.append(XPreformatted(saxutils.escape(part.strip("\r\n")), c_style))
+        else:
+            cleaned = part.strip("\r\n")
+            if cleaned:
+                flowables.append(Paragraph(safe_xml_text(cleaned), default_style))
+
+    if not flowables:
+        return Paragraph("", default_style)
+    if len(flowables) == 1:
+        return flowables[0]
+    return flowables
+
+
+def _add_inline_runs_docx(p: Any, text: str, default_font_size: Pt = Pt(9.5), is_bold: bool = False) -> None:
+    tokens = re.split(r"(`[^`]+`)", text)
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith("`") and tok.endswith("`") and len(tok) >= 2:
+            r = p.add_run(tok[1:-1])
+            r.font.name = "Courier New"
+            r.font.size = default_font_size
+            r.bold = is_bold
+        else:
+            r = p.add_run(tok)
+            r.font.size = default_font_size
+            r.bold = is_bold
+
+
+def add_docx_formatted_content(
+    target: Any,
+    text: Any,
+    default_font_size: Pt = Pt(9.5),
+    is_bold: bool = False,
+) -> None:
+    """Format text into a docx Paragraph or Table Cell:
+    - Inline `code` is rendered as monospace runs (Courier New).
+    - Multi-line ```code``` blocks are rendered in Courier New with explicit line breaks.
+    - Preserves <container-id> and other bracketed tokens literally.
+    """
+    s = str(text or "")
+    if "```" in s:
+        parts = re.split(r"```(?:\w+)?\n?(.*?)```", s, flags=re.DOTALL)
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if i % 2 == 1:
+                # Multi-line code block
+                if isinstance(target, docx.text.paragraph.Paragraph):
+                    p = target.insert_paragraph_before()
+                elif hasattr(target, "add_paragraph"):
+                    p = target.add_paragraph()
+                else:
+                    p = target
+                p.paragraph_format.left_indent = Inches(0.2)
+                lines = part.strip("\r\n").split("\n")
+                for l_idx, line in enumerate(lines):
+                    r = p.add_run(line)
+                    r.font.name = "Courier New"
+                    r.font.size = Pt(8.5)
+                    if l_idx < len(lines) - 1:
+                        p.add_run("\n")
+            else:
+                cleaned = part.strip("\r\n")
+                if cleaned:
+                    p = target.add_paragraph() if hasattr(target, "add_paragraph") else target
+                    _add_inline_runs_docx(p, cleaned, default_font_size, is_bold)
+    else:
+        p = target.add_paragraph() if hasattr(target, "add_paragraph") else target
+        _add_inline_runs_docx(p, s, default_font_size, is_bold)
+
+
+def extract_qa_flags_cell(q: dict[str, Any]) -> str:
+    """Extract and normalize QA flags for faculty review column."""
+    raw_flags = list(q.get("qa_flags") or q.get("review_flags") or [])
+    if q.get("needs_review") and not raw_flags:
+        raw_flags = [q.get("review_reason") or "NEEDS_REVIEW"]
+    if not raw_flags:
+        return "-"
+    norm_flags = []
+    for f in raw_flags:
+        fl = str(f).lower()
+        if "duplicate" in fl:
+            norm_flags.append("DUPLICATE")
+        elif "outdated" in fl or "deprecated" in fl:
+            norm_flags.append("OUTDATED")
+        elif "ungrounded" in fl:
+            norm_flags.append("UNGROUNDED_TOKEN")
+        elif "co_mismatch" in fl or "co mismatch" in fl:
+            norm_flags.append("CO_MISMATCH")
+        elif "lint" in fl or "stem" in fl:
+            norm_flags.append("STEM_LINT")
+        elif "rubric" in fl:
+            norm_flags.append("RUBRIC")
+        elif "generation_failed" in fl:
+            code = q.get("reason_code")
+            norm_flags.append(f"FAILED:{code}" if code else "FAILED")
+        else:
+            cleaned = str(f).strip().upper()[:16]
+            if cleaned:
+                norm_flags.append(cleaned)
+    seen = set()
+    uniq = [x for x in norm_flags if not (x in seen or seen.add(x))]
+    return ", ".join(uniq) if uniq else "-"
+
+
 def create_docx_exam_paper(
     questions: list[dict],
     course_name: str = "Course Assessment",
@@ -208,6 +376,11 @@ def create_docx_exam_paper(
     include_answers: bool = True,
     include_totals: bool = True,
     totals_summary: Optional[dict[str, Any]] = None,
+    profile: str = "faculty",
+    exam_type: str = "SEE",
+    semester: str = "",
+    date_str: str = "",
+    include_qa_flags: Optional[bool] = None,
 ) -> bytes:
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
@@ -216,6 +389,16 @@ def create_docx_exam_paper(
     """
     doc = docx.Document()
 
+    is_student = (str(profile).strip().lower() == "student")
+    if is_student:
+        include_source = False
+        include_answers = False
+        include_totals = False
+        include_knowledge_dim = False
+        include_qa_flags = False
+    elif include_qa_flags is None:
+        include_qa_flags = True if str(profile).strip().lower() == "faculty" else False if str(profile).strip().lower() == "faculty" else False
+
     # Standard Margins (0.75 in)
     for section in doc.sections:
         section.top_margin = Inches(0.75)
@@ -223,8 +406,15 @@ def create_docx_exam_paper(
         section.left_margin = Inches(0.75)
         section.right_margin = Inches(0.75)
 
-    clean_course = clean_book_name(course_name)
+    clean_course = clean_course_title(course_name)
     clean_covered = [clean_book_name(c) for c in covered_chapters] if covered_chapters else None
+
+    if is_student:
+        usn_p = doc.add_paragraph()
+        usn_r = usn_p.add_run("USN:   [   ][   ][   ][   ][   ][   ][   ][   ][   ][   ]\n")
+        usn_r.font.name = "Courier New"
+        usn_r.font.size = Pt(9.5)
+        usn_r.bold = True
 
     # 1. Header Information
     title_p = doc.add_paragraph()
@@ -234,18 +424,25 @@ def create_docx_exam_paper(
     title_run.font.size = Pt(15)
     title_run.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
 
+    exam_banner = "SEMESTER END EXAMINATION (SEE)" if str(exam_type).upper() == "SEE" else "CONTINUOUS INTERNAL EVALUATION (CIE)"
+    eb_run = title_p.add_run(f"{exam_banner}\n")
+    eb_run.bold = True
+    eb_run.font.size = Pt(10.5)
+    eb_run.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+
     sub_run = title_p.add_run(f"Subject: {clean_course} ({subject_code})")
     sub_run.bold = True
     sub_run.font.size = Pt(11)
 
-    header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
-    if header_covered_str:
-        ch_p = doc.add_paragraph()
-        ch_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {header_covered_str}")
-        ch_run.font.size = Pt(9.5)
-        ch_run.font.italic = True
-        ch_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+    if not is_student:
+        header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
+        if header_covered_str:
+            ch_p = doc.add_paragraph()
+            ch_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            ch_run = ch_p.add_run(f"Syllabus / Covered Chapters: {header_covered_str}")
+            ch_run.font.size = Pt(9.5)
+            ch_run.font.italic = True
+            ch_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
 
     total_marks, q_count_text = _get_paper_header_values(questions, totals_summary)
     time_str = "1.5 Hours" if total_marks <= 30 else ("2 Hours" if total_marks <= 50 else "3 Hours")
@@ -261,7 +458,8 @@ def create_docx_exam_paper(
 
     meta_cells = meta_table.rows[0].cells
     meta_cells[0].text = f"Time Allowed: {time_str}"
-    meta_cells[1].text = q_count_text
+    sem_str = f"Semester: {semester}" if semester else q_count_text
+    meta_cells[1].text = sem_str
     meta_cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     meta_cells[2].text = f"Max. Marks: {total_marks}"
     meta_cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -297,19 +495,28 @@ def create_docx_exam_paper(
     # 3. Main Question Table
     has_source = include_source and any(q.get("chapter") or q.get("page_start") or q.get("page") for q in questions)
     has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
+    has_qa = bool(include_qa_flags)
 
-    if has_kd and has_source:
-        headers = ["S.No", "Question Text", "Marks", "BT", "KD", "CO", "Source"]
-        t_widths = [Inches(0.6), Inches(3.2), Inches(0.55), Inches(0.55), Inches(0.75), Inches(0.55), Inches(0.75)]
-    elif has_kd and not has_source:
-        headers = ["S.No", "Question Text", "Marks", "BT", "KD", "CO"]
-        t_widths = [Inches(0.65), Inches(3.7), Inches(0.6), Inches(0.6), Inches(0.8), Inches(0.6)]
-    elif not has_kd and has_source:
-        headers = ["S.No", "Question Text", "Marks", "BT", "CO", "Source"]
-        t_widths = [Inches(0.65), Inches(3.6), Inches(0.6), Inches(0.6), Inches(0.6), Inches(0.9)]
+    if is_student:
+        headers = ["Q.No", "Question Text", "Marks", "BT", "CO"]
+        t_widths = [Inches(0.75), Inches(4.1), Inches(0.7), Inches(0.7), Inches(0.75)]
     else:
-        headers = ["S.No", "Question Text", "Marks", "BT", "CO"]
-        t_widths = [Inches(0.75), Inches(4.1), Inches(0.7), Inches(0.7), Inches(0.7)]
+        headers = ["Q.No", "Question Text", "Marks", "BT"]
+        fixed_widths = [0.6, 0.55, 0.55]  # Q.No, Marks, BT
+        if has_kd:
+            headers.append("KD")
+            fixed_widths.append(0.75)
+        headers.append("CO")
+        fixed_widths.append(0.55)
+        if has_source:
+            headers.append("Source")
+            fixed_widths.append(0.85)
+        if has_qa:
+            headers.append("QA Flags")
+            fixed_widths.append(0.75)
+
+        q_w = max(2.5, 7.0 - sum(fixed_widths))
+        t_widths = [Inches(fixed_widths[0]), Inches(q_w)] + [Inches(w) for w in fixed_widths[1:]]
 
     num_cols = len(headers)
     q_table = doc.add_table(rows=1, cols=num_cols)
@@ -389,7 +596,8 @@ def create_docx_exam_paper(
         row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         col_idx += 1
 
-        row_cells[col_idx].text = str(q.get("question", ""))
+        row_cells[col_idx].text = ""
+        add_docx_formatted_content(row_cells[col_idx], q.get("question", ""), default_font_size=Pt(9.5))
         col_idx += 1
 
         row_cells[col_idx].text = f"[{q.get('marks', '')}]"
@@ -433,6 +641,14 @@ def create_docx_exam_paper(
             src_str = f"{src_label} ({p_str})" if src_label and p_str else (src_label or p_str)
             row_cells[col_idx].text = src_str
             row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            col_idx += 1
+
+        if has_qa:
+            row_cells[col_idx].text = extract_qa_flags_cell(q)
+            row_cells[col_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for r in row_cells[col_idx].paragraphs[0].runs:
+                r.font.size = Pt(8.0)
+            col_idx += 1
 
         for cell in row_cells:
             for p in cell.paragraphs:
@@ -521,14 +737,14 @@ def create_docx_exam_paper(
                     a_label.bold = True
                     a_label.font.size = Pt(9.5)
                     a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
-                    ap.add_run(alt).font.size = Pt(9.0)
+                    add_docx_formatted_content(doc, alt, default_font_size=Pt(9.0))
             elif alternatives:
                 ap = doc.add_paragraph()
                 a_label = ap.add_run("Model Answer / Key Points:\n")
                 a_label.bold = True
                 a_label.font.size = Pt(9.5)
                 a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
-                ap.add_run(alternatives[0]).font.size = Pt(9.0)
+                add_docx_formatted_content(doc, alternatives[0], default_font_size=Pt(9.0))
             else:
                 doc.add_paragraph("Model answer pending evaluation.").italic = True
 
@@ -644,6 +860,49 @@ def create_docx_exam_paper(
                         shd = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
                         cell._tc.get_or_add_tcPr().append(shd)
 
+            doc.add_paragraph("")
+
+        # Table 3: Knowledge Dimension (KD) Totals Table
+        kd_rows = table_rows_dict.get("kd_table", [])
+        if kd_rows:
+            p_kd = doc.add_paragraph()
+            r_kd = p_kd.add_run("3. Knowledge Dimension (KD) Distribution:")
+            r_kd.bold = True
+            r_kd.font.size = Pt(10)
+
+            t_kd = doc.add_table(rows=len(kd_rows), cols=len(kd_rows[0]))
+            t_kd.alignment = WD_TABLE_ALIGNMENT.CENTER
+            t_kd.autofit = False
+
+            kd_col_widths = [Inches(2.5), Inches(1.3), Inches(1.4), Inches(1.5)]
+            for r_idx, row_data in enumerate(kd_rows):
+                row_cells = t_kd.rows[r_idx].cells
+                is_hdr = (r_idx == 0)
+                is_total = (r_idx == len(kd_rows) - 1)
+
+                for c_idx, val in enumerate(row_data):
+                    cell = row_cells[c_idx]
+                    cell.width = kd_col_widths[c_idx]
+                    cell.text = str(val)
+                    p = cell.paragraphs[0]
+                    if c_idx > 0:
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                    for r in p.runs:
+                        r.font.size = Pt(9.0)
+                        if is_hdr:
+                            r.bold = True
+                            r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                        elif is_total:
+                            r.bold = True
+
+                    if is_hdr:
+                        shd = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+                    elif is_total:
+                        shd = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
+                        cell._tc.get_or_add_tcPr().append(shd)
+
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -661,6 +920,11 @@ def create_pdf_exam_paper(
     include_answers: bool = True,
     include_totals: bool = True,
     totals_summary: Optional[dict[str, Any]] = None,
+    profile: str = "faculty",
+    exam_type: str = "SEE",
+    semester: str = "",
+    date_str: str = "",
+    include_qa_flags: Optional[bool] = None,
 ) -> bytes:
     """Generate a formatted PDF exam question paper using ReportLab.
 
@@ -677,6 +941,16 @@ def create_pdf_exam_paper(
         bottomMargin=36,
     )
     styles = getSampleStyleSheet()
+
+    is_student = (str(profile).strip().lower() == "student")
+    if is_student:
+        include_source = False
+        include_answers = False
+        include_totals = False
+        include_knowledge_dim = False
+        include_qa_flags = False
+    elif include_qa_flags is None:
+        include_qa_flags = True if str(profile).strip().lower() == "faculty" else False
 
     title_style = ParagraphStyle(
         "ExamTitle",
@@ -763,26 +1037,54 @@ def create_pdf_exam_paper(
         textColor=colors.HexColor("#2563EB"),
         fontName="Helvetica-Bold",
     )
+    qa_cell_style = ParagraphStyle(
+        "QACellStyle",
+        parent=styles["Normal"],
+        fontSize=7.5,
+        leading=9.5,
+        alignment=1,
+        textColor=colors.HexColor("#DC2626"),
+        fontName="Helvetica-Bold",
+    )
 
-    clean_course = clean_book_name(course_name)
+    clean_course = clean_course_title(course_name)
     clean_covered = [clean_book_name(c) for c in covered_chapters] if covered_chapters else None
 
     elements = []
-    elements.append(Paragraph(institution_name.upper(), title_style))
-    elements.append(Paragraph(f"Subject: {clean_course} ({subject_code})", sub_style))
-    header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
-    if header_covered_str:
-        elements.append(Paragraph(f"Syllabus / Covered Chapters: {header_covered_str}", ch_style))
+    if is_student:
+        usn_data = [["USN:"] + ["" for _ in range(10)]]
+        usn_table = Table(usn_data, colWidths=[35] + [16 for _ in range(10)], rowHeights=[16])
+        usn_table.setStyle(
+            TableStyle([
+                ("GRID", (1, 0), (-1, -1), 1, colors.HexColor("#0F172A")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (0, 0), 9),
+            ])
+        )
+        elements.append(usn_table)
+        elements.append(Spacer(1, 6))
+
+    elements.append(Paragraph(safe_xml_text(institution_name.upper()), title_style))
+    exam_banner = "SEMESTER END EXAMINATION (SEE)" if str(exam_type).upper() == "SEE" else "CONTINUOUS INTERNAL EVALUATION (CIE)"
+    elements.append(Paragraph(exam_banner, sub_style))
+    elements.append(Paragraph(f"Subject: {safe_xml_text(clean_course)} ({safe_xml_text(subject_code)})", sub_style))
+
+    if not is_student:
+        header_covered_str = format_covered_chapters_header(covered_chapters, questions=questions)
+        if header_covered_str:
+            elements.append(Paragraph(f"Syllabus / Covered Chapters: {safe_xml_text(header_covered_str)}", ch_style))
     elements.append(Spacer(1, 8))
 
     total_marks, q_count_text = _get_paper_header_values(questions, totals_summary)
     time_str = "1.5 Hours" if total_marks <= 30 else ("2 Hours" if total_marks <= 50 else "3 Hours")
 
     # Meta banner
+    sem_str = f"Semester: {semester}" if semester else q_count_text
     meta_data = [
         [
             Paragraph(f"<b>Time Allowed:</b> {time_str}", styles["Normal"]),
-            Paragraph(f"<b>{q_count_text}</b>", styles["Normal"]),
+            Paragraph(f"<b>{sem_str}</b>", styles["Normal"]),
             Paragraph(f"<b>Max. Marks:</b> {total_marks}", styles["Normal"]),
         ]
     ]
@@ -819,47 +1121,39 @@ def create_pdf_exam_paper(
 
     has_source = include_source and any(q.get("chapter") or q.get("page_start") or q.get("page") for q in questions)
     has_kd = include_knowledge_dim and any(q.get("knowledge_dimension") or q.get("kd") for q in questions)
+    has_qa = bool(include_qa_flags)
 
-    if has_kd and has_source:
+    if is_student:
         table_headers = [
-            Paragraph("S.No", hdr_style),
-            Paragraph("Question Text", hdr_style),
-            Paragraph("Marks", hdr_style),
-            Paragraph("BT", hdr_style),
-            Paragraph("KD", hdr_style),
-            Paragraph("CO", hdr_style),
-            Paragraph("Source", hdr_style),
-        ]
-        col_widths = [35, 215, 38, 42, 65, 42, 85]
-    elif has_kd and not has_source:
-        table_headers = [
-            Paragraph("S.No", hdr_style),
-            Paragraph("Question Text", hdr_style),
-            Paragraph("Marks", hdr_style),
-            Paragraph("BT", hdr_style),
-            Paragraph("KD", hdr_style),
-            Paragraph("CO", hdr_style),
-        ]
-        col_widths = [40, 275, 42, 45, 75, 45]
-    elif not has_kd and has_source:
-        table_headers = [
-            Paragraph("S.No", hdr_style),
+            Paragraph("Q.No", hdr_style),
             Paragraph("Question Text", hdr_style),
             Paragraph("Marks", hdr_style),
             Paragraph("BT", hdr_style),
             Paragraph("CO", hdr_style),
-            Paragraph("Source", hdr_style),
         ]
-        col_widths = [40, 260, 45, 45, 45, 85]
+        col_widths = [42, 345, 45, 45, 45]
     else:
         table_headers = [
-            Paragraph("S.No", hdr_style),
+            Paragraph("Q.No", hdr_style),
             Paragraph("Question Text", hdr_style),
             Paragraph("Marks", hdr_style),
             Paragraph("BT", hdr_style),
-            Paragraph("CO", hdr_style),
         ]
-        col_widths = [45, 335, 45, 45, 50]
+        fixed_widths = [34, 36, 36]  # Q.No, Marks, BT
+        if has_kd:
+            table_headers.append(Paragraph("KD", hdr_style))
+            fixed_widths.append(58)
+        table_headers.append(Paragraph("CO", hdr_style))
+        fixed_widths.append(36)
+        if has_source:
+            table_headers.append(Paragraph("Source", hdr_style))
+            fixed_widths.append(72)
+        if has_qa:
+            table_headers.append(Paragraph("QA Flags", hdr_style))
+            fixed_widths.append(66)
+
+        q_w = max(180, 522 - sum(fixed_widths))
+        col_widths = [fixed_widths[0], q_w] + fixed_widths[1:]
 
     table_data = [table_headers]
     current_unit = None
@@ -898,17 +1192,17 @@ def create_pdf_exam_paper(
                 ])
 
         row = [
-            Paragraph(str(q.get("id", "")), q_bold_cell),
-            Paragraph(str(q.get("question", "")), q_cell_style),
-            Paragraph(f"[{q.get('marks', '')}]", q_bold_cell),
-            Paragraph(str(q.get("level", "")), q_bold_cell),
+            Paragraph(safe_xml_text(str(q.get("id", ""))), q_bold_cell),
+            format_pdf_cell_content(q.get("question", ""), q_cell_style),
+            Paragraph(safe_xml_text(f"[{q.get('marks', '')}]"), q_bold_cell),
+            Paragraph(safe_xml_text(str(q.get("level", ""))), q_bold_cell),
         ]
 
         if has_kd:
             kd_val = q.get("knowledge_dimension") or q.get("kd", "Conceptual")
-            row.append(Paragraph(str(kd_val), q_bold_cell))
+            row.append(Paragraph(safe_xml_text(str(kd_val)), q_bold_cell))
 
-        row.append(Paragraph(str(q.get("co", "")), q_bold_cell))
+        row.append(Paragraph(safe_xml_text(str(q.get("co", ""))), q_bold_cell))
 
         if has_source:
             ch = clean_book_name(q.get("chapter", ""))
@@ -931,7 +1225,10 @@ def create_pdf_exam_paper(
             else:
                 src_label = ""
             src_str = f"{src_label} ({p_str})" if src_label and p_str else (src_label or p_str)
-            row.append(Paragraph(src_str, q_cell_style))
+            row.append(Paragraph(safe_xml_text(src_str), q_cell_style))
+
+        if has_qa:
+            row.append(Paragraph(safe_xml_text(extract_qa_flags_cell(q)), qa_cell_style))
 
         table_data.append(row)
         prev_q = q
@@ -942,8 +1239,8 @@ def create_pdf_exam_paper(
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
     ]
 
@@ -956,7 +1253,7 @@ def create_pdf_exam_paper(
         t_style.append(("BACKGROUND", (0, or_idx), (-1, or_idx), colors.HexColor("#FEF2F2")))
         t_style.append(("ALIGN", (0, or_idx), (-1, or_idx), "CENTER"))
 
-    q_table = Table(table_data, colWidths=col_widths)
+    q_table = Table(table_data, colWidths=col_widths, repeatRows=1, splitByRow=1)
     q_table.setStyle(TableStyle(t_style))
     elements.append(q_table)
 
@@ -964,7 +1261,7 @@ def create_pdf_exam_paper(
         elements.append(Spacer(1, 12))
         elements.append(Paragraph("<b>Course Outcomes (CO / LO) Reference:</b>", styles["Normal"]))
         for code, desc in outcomes.items():
-            elements.append(Paragraph(f"• <b>{code}</b>: {desc}", styles["Normal"]))
+            elements.append(Paragraph(f"• <b>{safe_xml_text(code)}</b>: {safe_xml_text(desc)}", styles["Normal"]))
 
     elements.append(Spacer(1, 8))
     elements.append(
@@ -1003,7 +1300,7 @@ def create_pdf_exam_paper(
             q_lvl = q.get("level", "")
             q_co = q.get("co", "")
 
-            q_banner = f"<b>Question {q_id}:</b> {q_txt} [<b>{q_marks} Marks</b>] <i>({q_lvl}, {q_co})</i>"
+            q_banner = f"<b>Question {safe_xml_text(q_id)}:</b> {safe_xml_text(q_txt)} [<b>{safe_xml_text(q_marks)} Marks</b>] <i>({safe_xml_text(q_lvl)}, {safe_xml_text(q_co)})</i>"
             elements.append(Paragraph(q_banner, styles["Normal"]))
             elements.append(Spacer(1, 2))
 
@@ -1011,11 +1308,19 @@ def create_pdf_exam_paper(
             if len(alternatives) > 1:
                 for a_idx, alt in enumerate(alternatives, 1):
                     label = "Model Answer:" if a_idx == 1 else f"Alternative approach {a_idx - 1}:"
-                    elements.append(Paragraph(f"<b>{label}</b>", ans_text_style))
-                    elements.append(Paragraph(alt.replace("\n", "<br/>"), ans_text_style))
+                    elements.append(Paragraph(f"<b>{safe_xml_text(label)}</b>", ans_text_style))
+                    flow = format_pdf_cell_content(alt, ans_text_style)
+                    if isinstance(flow, list):
+                        elements.extend(flow)
+                    else:
+                        elements.append(flow)
             elif alternatives:
                 elements.append(Paragraph("<b>Model Answer / Key Points:</b>", ans_text_style))
-                elements.append(Paragraph(alternatives[0].replace("\n", "<br/>"), ans_text_style))
+                flow = format_pdf_cell_content(alternatives[0], ans_text_style)
+                if isinstance(flow, list):
+                    elements.extend(flow)
+                else:
+                    elements.append(flow)
 
             elements.append(Spacer(1, 8))
             prev_ans_q = q
@@ -1049,13 +1354,15 @@ def create_pdf_exam_paper(
                  for c in row]
                 for r_i, row in enumerate(co_rows)
             ]
-            t_co = Table(co_flow_data, colWidths=[180, 100, 110, 110])
+            t_co = Table(co_flow_data, colWidths=[180, 100, 110, 110], repeatRows=1, splitByRow=1)
             t_co.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ]))
             elements.append(t_co)
             elements.append(Spacer(1, 10))
@@ -1069,15 +1376,64 @@ def create_pdf_exam_paper(
                  for c in row]
                 for r_i, row in enumerate(bt_rows)
             ]
-            t_bt = Table(bt_flow_data, colWidths=[180, 100, 110, 110])
+            t_bt = Table(bt_flow_data, colWidths=[180, 100, 110, 110], repeatRows=1, splitByRow=1)
             t_bt.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
                 ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ]))
             elements.append(t_bt)
+            elements.append(Spacer(1, 10))
+
+        # Render KD table
+        kd_rows = table_rows_dict.get("kd_table", [])
+        if kd_rows:
+            elements.append(Paragraph("<b>3. Knowledge Dimension (KD) Distribution:</b>", styles["Normal"]))
+            elements.append(Spacer(1, 4))
+            kd_flow_data = [
+                [Paragraph(str(c), hdr_style if r_i == 0 else (q_bold_cell if r_i == len(kd_rows) - 1 else q_cell_style))
+                 for c in row]
+                for r_i, row in enumerate(kd_rows)
+            ]
+            t_kd = Table(kd_flow_data, colWidths=[180, 100, 110, 110], repeatRows=1, splitByRow=1)
+            t_kd.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            elements.append(t_kd)
 
     doc.build(elements)
     return buf.getvalue()
+
+
+def create_student_pdf_paper(questions: list[dict], **kwargs) -> bytes:
+    """Convenience helper: Generate student exam PDF paper without sources or solutions."""
+    kwargs["profile"] = "student"
+    return create_pdf_exam_paper(questions, **kwargs)
+
+
+def create_faculty_pdf_paper(questions: list[dict], **kwargs) -> bytes:
+    """Convenience helper: Generate faculty exam PDF paper with solutions, sources, QA flags, and totals."""
+    kwargs["profile"] = "faculty"
+    return create_pdf_exam_paper(questions, **kwargs)
+
+
+def create_student_docx_paper(questions: list[dict], **kwargs) -> bytes:
+    """Convenience helper: Generate student exam Word DOCX paper without sources or solutions."""
+    kwargs["profile"] = "student"
+    return create_docx_exam_paper(questions, **kwargs)
+
+
+def create_faculty_docx_paper(questions: list[dict], **kwargs) -> bytes:
+    """Convenience helper: Generate faculty exam Word DOCX paper with solutions, sources, QA flags, and totals."""
+    kwargs["profile"] = "faculty"
+    return create_docx_exam_paper(questions, **kwargs)

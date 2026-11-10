@@ -167,3 +167,145 @@ def test_generate_paper_preserves_knowledge_dimension():
     assert q["kd"] == "Factual"
     assert q["level"] == "L1"
 
+
+# -----------------------------------------------------------------------------
+# PART F: Dynamic 2D KD classification, stem corrections, and CO verification
+# -----------------------------------------------------------------------------
+
+def test_infer_knowledge_dimension():
+    """Verify 2D BT x KD classification of questions and answers."""
+    from blooms.revised_taxonomy import infer_knowledge_dimension
+
+    # Procedural questions
+    assert infer_knowledge_dimension("Modify the code in the Dockerfile to enable multi-stage caching?") == "Procedural"
+    assert infer_knowledge_dimension("Calculate the maximum throughput across cluster worker nodes?") == "Procedural"
+    assert infer_knowledge_dimension("Outline the steps to configure persistent volume claims?") == "Procedural"
+    assert infer_knowledge_dimension("Describe the steps to deploy a rolling update in Kubernetes?") == "Procedural"
+
+    # Conceptual questions
+    assert infer_knowledge_dimension("Distinguish between managed and unmanaged pods in Kubernetes?") == "Conceptual"
+    assert infer_knowledge_dimension("Paraphrase the core principles of namespace isolation?") == "Conceptual"
+    assert infer_knowledge_dimension("Compare StatefulSets and Deployments in Kubernetes clusters?") == "Conceptual"
+    assert infer_knowledge_dimension("Explain how container overlay networks function?") == "Conceptual"
+
+    # Metacognitive questions
+    assert infer_knowledge_dimension("Assess and justify the choice of Helm charts over plain manifests?") == "Metacognitive"
+    assert infer_knowledge_dimension("Evaluate the strategic trade-offs of microservice vs monolithic architectures?") == "Metacognitive"
+    assert infer_knowledge_dimension("Choose between StatefulSets and Deployments and defend the choice?") == "Metacognitive"
+
+    # Factual questions
+    assert infer_knowledge_dimension("State the definition of a container image layer?") == "Factual"
+    assert infer_knowledge_dimension("List the core components of the Kubernetes control plane?") == "Factual"
+    assert infer_knowledge_dimension("Define the term daemonset?") == "Factual"
+
+
+def test_problem6_kd_evidence_regressions():
+    """Verify stem rewriting and correction for all 7 evidence items from Problem 6."""
+    from blooms.verb_bank import correct_stem_verb_for_kd, is_verb_allowed_for_kd
+
+    # 7(b): modify code tagged Conceptual -> rewrite to Explain how to adapt
+    q_7b = "Modify code in Dockerfile to optimize layer caching?"
+    corr_7b, was_corr_7b, _ = correct_stem_verb_for_kd(q_7b, level="L3", kd="Conceptual")
+    assert was_corr_7b is True
+    assert corr_7b.startswith("Explain how to adapt")
+
+    # 8(b): calculate tagged Conceptual -> rewrite to Explain the factors determining
+    q_8b = "Calculate the network throughput of the Kubernetes cluster pods?"
+    corr_8b, was_corr_8b, _ = correct_stem_verb_for_kd(q_8b, level="L3", kd="Conceptual")
+    assert was_corr_8b is True
+    assert corr_8b.startswith("Explain the factors determining")
+
+    # 5(b) & 6(b): distinguish/contrast tagged Procedural -> rewrite to Differentiate (L4) or Outline steps (L2)
+    q_5b = "Distinguish between managed and unmanaged pods?"
+    corr_5b, was_corr_5b, _ = correct_stem_verb_for_kd(q_5b, level="L4", kd="Procedural")
+    assert was_corr_5b is True
+    assert corr_5b.startswith("Differentiate between")
+
+    q_6b = "Contrast bridge networking with host networking?"
+    corr_6b, was_corr_6b, _ = correct_stem_verb_for_kd(q_6b, level="L4", kd="Procedural")
+    assert was_corr_6b is True
+    assert corr_6b.startswith("Differentiate bridge")
+
+    # 5(c): paraphrase tagged Factual -> rewrite to State
+    q_5c = "Paraphrase the definition of container virtualization?"
+    corr_5c, was_corr_5c, _ = correct_stem_verb_for_kd(q_5c, level="L2", kd="Factual")
+    assert was_corr_5c is True
+    assert corr_5c.startswith("State")
+
+    # 2(a): describe the steps tagged Conceptual -> rewrite to Explain the process of
+    q_2a = "Describe the steps of pod initialization sequence?"
+    corr_2a, was_corr_2a, _ = correct_stem_verb_for_kd(q_2a, level="L2", kd="Conceptual")
+    assert was_corr_2a is True
+    assert corr_2a.startswith("Explain the process of")
+
+    # 4(a): compare tagged Metacognitive -> rewrite to Evaluate and justify
+    q_4a = "Compare Helm and Kustomize for continuous deployment?"
+    corr_4a, was_corr_4a, _ = correct_stem_verb_for_kd(q_4a, level="L4", kd="Metacognitive")
+    assert was_corr_4a is True
+    assert corr_4a.startswith("Evaluate and justify the trade-offs between")
+
+    # 4(b): assess and justify tagged Procedural -> rewrite to Validate procedural efficiency
+    q_4b = "Assess and justify the use of StatefulSets for clustered databases?"
+    corr_4b, was_corr_4b, _ = correct_stem_verb_for_kd(q_4b, level="L5", kd="Procedural")
+    assert was_corr_4b is True
+    assert corr_4b.startswith("Validate the procedural efficiency of")
+
+
+def test_allowed_kds_by_level_constraint():
+    """Verify allowed KDs by Bloom's level for deficit balancing."""
+    from blooms.revised_taxonomy import ALLOWED_KDS_BY_LEVEL
+
+    # L1 must only have Factual and Conceptual
+    assert ALLOWED_KDS_BY_LEVEL["L1"] == ["Factual", "Conceptual"]
+    assert "Metacognitive" not in ALLOWED_KDS_BY_LEVEL["L1"]
+    assert "Procedural" not in ALLOWED_KDS_BY_LEVEL["L1"]
+
+    # Higher levels allow Metacognitive
+    assert "Metacognitive" in ALLOWED_KDS_BY_LEVEL["L5"]
+    assert "Metacognitive" in ALLOWED_KDS_BY_LEVEL["L6"]
+
+
+def test_verify_question_co_alignment_keyword_and_qa_flag():
+    """Verify that questions misaligned with their assigned CO are flagged with CO_MISMATCH."""
+    from export_utils import extract_qa_flags_cell
+    from generation.generator import verify_question_co_alignment
+
+    outcomes = {
+        "CO1": "Understand container virtualization fundamentals, Docker daemon, and image management.",
+        "CO2": "Deploy and manage container orchestration clusters using Kubernetes, pods, services, and deployments.",
+    }
+
+    # Question clearly about Kubernetes pods/services, but assigned CO1 (Docker fundamentals)
+    questions = [
+        {
+            "id": "1",
+            "question": "Deploy and manage container orchestration clusters with Kubernetes pods and services?",
+            "answer": "Point 1 (3M): Deploy clusters. Point 2 (2M): Manage services.",
+            "co": "CO1",
+            "valid": True,
+            "review_flags": [],
+            "qa_flags": [],
+        },
+        {
+            "id": "2",
+            "question": "Explain Docker daemon architecture and container image management?",
+            "answer": "Point 1 (3M): Docker daemon. Point 2 (2M): Image layers.",
+            "co": "CO1",
+            "valid": True,
+            "review_flags": [],
+            "qa_flags": [],
+        },
+    ]
+
+    mismatches = verify_question_co_alignment(questions, outcomes, embedder=None)
+    assert len(mismatches) == 1
+    assert mismatches[0][0] == 0  # Question 1 was flagged
+    assert "CO mismatch" in mismatches[0][1]
+
+    # Verify QA flag extraction
+    questions[0]["review_flags"].append(mismatches[0][1])
+    questions[0]["qa_flags"].append("CO_MISMATCH")
+    flag_cell = extract_qa_flags_cell(questions[0])
+    assert "CO_MISMATCH" in flag_cell
+
+

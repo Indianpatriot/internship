@@ -2,7 +2,14 @@
 import io
 import docx
 import fitz
-from export_utils import create_docx_exam_paper, create_pdf_exam_paper
+from export_utils import (
+    create_docx_exam_paper,
+    create_pdf_exam_paper,
+    create_student_docx_paper,
+    create_student_pdf_paper,
+    create_faculty_docx_paper,
+    create_faculty_pdf_paper,
+)
 from blueprint import get_50_mark_blueprint, build_blueprint, calculate_blueprint_stats
 from totals import summarize
 
@@ -242,4 +249,178 @@ def test_no_section_or_part_in_100_mark_export():
     assert "UNIT 2" in pdf_text
     assert "UNIT 5" in pdf_text
     assert "— OR —" in pdf_text
+
+
+def test_export_pdf_preserves_code_bracketed_tokens_and_newlines():
+    """PART B Regression: Verify ReportLab PDF preserves <container-id> and code block newlines."""
+    dockerfile_code = "FROM alpine:3.18\nRUN apk add --no-cache curl\nCMD [\"curl\", \"http://localhost\"]"
+    questions = [
+        {
+            "id": "1(a)",
+            "unit": 1,
+            "question_no": 1,
+            "sub_index": 1,
+            "alternative_group": "U1",
+            "question": "Run `docker inspect <container-id>` with `<placeholder-token>` to extract container configuration?",
+            "marks": 5,
+            "level": "L3",
+            "knowledge_dimension": "Procedural",
+            "co": "CO1",
+            "answer": (
+                "Point 1 (2M): Execute `docker inspect <container-id>` to inspect low-level container metadata.\n"
+                "Point 2 (3M): Here is the corresponding Dockerfile specification:\n"
+                f"```dockerfile\n{dockerfile_code}\n```"
+            ),
+        }
+    ]
+
+    # 1. PDF Export verification with PyMuPDF (fitz)
+    pdf_bytes = create_pdf_exam_paper(
+        questions,
+        course_name="Container Technologies",
+        include_answers=True,
+    )
+    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pdf_text = "\n".join([page.get_text() for page in pdf_doc])
+
+    # Assert <container-id> and <placeholder-token> survived intact without XML parsing error or loss
+    assert "<container-id>" in pdf_text
+    assert "<placeholder-token>" in pdf_text
+
+    # Assert Dockerfile newlines survived intact
+    assert "FROM alpine:3.18" in pdf_text
+    assert "RUN apk add --no-cache curl" in pdf_text
+    assert "CMD [\"curl\", \"http://localhost\"]" in pdf_text
+    # Verify newlines between lines in the code block
+    assert "FROM alpine:3.18\nRUN apk add" in pdf_text or "RUN apk add --no-cache curl\nCMD" in pdf_text
+
+    # 2. DOCX Export verification
+    docx_bytes = create_docx_exam_paper(
+        questions,
+        course_name="Container Technologies",
+        include_answers=True,
+    )
+    doc = docx.Document(io.BytesIO(docx_bytes))
+    docx_text = "\n".join(
+        [p.text for p in doc.paragraphs]
+        + [c.text for t in doc.tables for row in t.rows for c in row.cells]
+    )
+    assert "<container-id>" in docx_text
+    assert "<placeholder-token>" in docx_text
+    assert "FROM alpine:3.18\nRUN apk add" in docx_text or ("FROM alpine:3.18" in docx_text and "RUN apk add" in docx_text)
+
+
+def test_student_and_faculty_paper_profiles():
+    """PART C: Student copy must omit sources, chapters, and answers, while Faculty copy includes them with QA flags and KD totals."""
+    questions = [
+        {
+            "id": "1(a)",
+            "unit": 1,
+            "question_no": 1,
+            "sub_index": 1,
+            "question": "Demonstrate Kubernetes service discovery mechanisms?",
+            "marks": 10,
+            "level": "L3",
+            "knowledge_dimension": "Procedural",
+            "co": "CO2",
+            "chapter": "Chapter 4: Services and Networking",
+            "page_start": 123,
+            "display_label": "Kubernetes in Action",
+            "answer": "Kubernetes provisions cluster-internal DNS and environment variables.",
+            "review_flags": ["DUPLICATE", "CO_MISMATCH"],
+        }
+    ]
+    outcomes = {"CO2": "Configure networking and services"}
+    summary = summarize(questions, attempted_only=True)
+
+    # 1. Student PDF
+    s_pdf = create_student_pdf_paper(
+        questions,
+        course_name="1_Docker_in_Practice_&_2_Kubernetes_in_Action_Exam_Paper",
+        subject_code="CS-601",
+        outcomes=outcomes,
+        totals_summary=summary,
+        covered_chapters=["Chapter 4: Services and Networking"],
+    )
+    s_doc = fitz.open(stream=s_pdf, filetype="pdf")
+    s_text = "\n".join([page.get_text() for page in s_doc])
+
+    assert "USN:" in s_text
+    assert "SEMESTER END EXAMINATION (SEE)" in s_text
+    assert "Docker in Practice & Kubernetes in Action" in s_text
+    assert "1_Docker_in_Practice" not in s_text
+    # Student paper must NOT contain internal details
+    assert "Chapter 4: Services and Networking" not in s_text
+    assert "p.123" not in s_text
+    assert "SCHEME OF EVALUATION" not in s_text
+    assert "Kubernetes provisions cluster-internal DNS" not in s_text
+    assert "CUMULATIVE" not in s_text
+    assert "QA Flags" not in s_text
+
+    # 2. Student DOCX
+    s_docx = create_student_docx_paper(
+        questions,
+        course_name="1_Docker_in_Practice_&_2_Kubernetes_in_Action_Exam_Paper",
+        subject_code="CS-601",
+        outcomes=outcomes,
+        totals_summary=summary,
+        covered_chapters=["Chapter 4: Services and Networking"],
+    )
+    doc_s = docx.Document(io.BytesIO(s_docx))
+    s_docx_text = "\n".join(
+        [p.text for p in doc_s.paragraphs]
+        + [c.text for t in doc_s.tables for row in t.rows for c in row.cells]
+    )
+    assert "USN:" in s_docx_text
+    assert "Docker in Practice & Kubernetes in Action" in s_docx_text
+    assert "Chapter 4: Services and Networking" not in s_docx_text
+    assert "p.123" not in s_docx_text
+    assert "SCHEME OF EVALUATION" not in s_docx_text
+    assert "Kubernetes provisions cluster-internal DNS" not in s_docx_text
+    assert "QA Flags" not in s_docx_text
+
+    # 3. Faculty PDF
+    f_pdf = create_faculty_pdf_paper(
+        questions,
+        course_name="1_Docker_in_Practice_&_2_Kubernetes_in_Action_Exam_Paper",
+        subject_code="CS-601",
+        outcomes=outcomes,
+        totals_summary=summary,
+        covered_chapters=["Chapter 4: Services and Networking"],
+    )
+    f_doc = fitz.open(stream=f_pdf, filetype="pdf")
+    f_text = "\n".join([page.get_text() for page in f_doc])
+
+    assert "Syllabus / Covered Chapters" in f_text
+    assert "Source" in f_text
+    assert "QA Flags" in f_text
+    assert "DUPLICATE" in f_text
+    assert "CO_MISMATCH" in f_text
+    assert "SCHEME OF EVALUATION & MODEL ANSWERS" in f_text
+    assert "Kubernetes provisions cluster-internal DNS" in f_text
+    assert "Knowledge Dimension (KD) Distribution" in f_text
+
+    # 4. Faculty DOCX
+    f_docx = create_faculty_docx_paper(
+        questions,
+        course_name="1_Docker_in_Practice_&_2_Kubernetes_in_Action_Exam_Paper",
+        subject_code="CS-601",
+        outcomes=outcomes,
+        totals_summary=summary,
+        covered_chapters=["Chapter 4: Services and Networking"],
+    )
+    doc_f = docx.Document(io.BytesIO(f_docx))
+    f_docx_text = "\n".join(
+        [p.text for p in doc_f.paragraphs]
+        + [c.text for t in doc_f.tables for row in t.rows for c in row.cells]
+    )
+    assert "Syllabus / Covered Chapters" in f_docx_text
+    assert "QA Flags" in f_docx_text
+    assert "DUPLICATE" in f_docx_text
+    assert "CO_MISMATCH" in f_docx_text
+    assert "SCHEME OF EVALUATION & MODEL ANSWERS" in f_docx_text
+    assert "Kubernetes provisions cluster-internal DNS" in f_docx_text
+    assert "Knowledge Dimension (KD) Distribution" in f_docx_text
+
+
 

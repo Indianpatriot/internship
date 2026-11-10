@@ -158,6 +158,9 @@ def get_cached_docx_paper(
     include_answers,
     include_totals,
     totals_summary_data,
+    profile="faculty",
+    exam_type="SEE",
+    semester="",
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_docx_exam_paper(
@@ -172,6 +175,9 @@ def get_cached_docx_paper(
         include_answers=include_answers,
         include_totals=include_totals,
         totals_summary=totals_summary_data,
+        profile=profile,
+        exam_type=exam_type,
+        semester=semester,
     )
 
 
@@ -186,6 +192,9 @@ def get_cached_pdf_paper(
     include_answers,
     include_totals,
     totals_summary_data,
+    profile="faculty",
+    exam_type="SEE",
+    semester="",
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_pdf_exam_paper(
@@ -200,6 +209,9 @@ def get_cached_pdf_paper(
         include_answers=include_answers,
         include_totals=include_totals,
         totals_summary=totals_summary_data,
+        profile=profile,
+        exam_type=exam_type,
+        semester=semester,
     )
 
 
@@ -250,6 +262,12 @@ if "outcomes_version" not in st.session_state:
 
 if "results" not in st.session_state:
     st.session_state.results = None
+if "gen_ctx" not in st.session_state:
+    st.session_state.gen_ctx = None
+if "gen_result" not in st.session_state:
+    st.session_state.gen_result = None
+if "regen_count" not in st.session_state:
+    st.session_state.regen_count = 0
 
 if "institution_name" not in st.session_state:
     st.session_state.institution_name = "EXAMINATION QUESTION PAPER"
@@ -298,6 +316,12 @@ with st.sidebar:
             st.success(f"🟢 **Ollama Connected**: `{model_name}` ({config.OLLAMA_HOST})")
         else:
             st.error(f"🔴 Ollama server not reachable at `{config.OLLAMA_HOST}`. Start it with `ollama serve`.")
+
+    exclude_deprecated = st.checkbox(
+        "Exclude deprecated topics",
+        value=True,
+        help="Exclude outdated or deprecated tools/APIs (e.g. rkt, Docker links, dockershim, ReplicationController).",
+    )
 
     st.divider()
     st.subheader("📝 Exam Paper Details")
@@ -1437,6 +1461,7 @@ if generate_clicked:
                 force_regenerate=force_regenerate,
                 keep_placeholders=True,
                 outcome_descs=outcomes_dict,
+                exclude_deprecated=exclude_deprecated,
             )
             progress_bar.progress(1.0)
             status_text.empty()
@@ -1457,17 +1482,36 @@ if generate_clicked:
 
             results["covered_chapters"] = mapped_chaps_for_units
             st.session_state.results = results
+            st.session_state["gen_result"] = results
+            st.session_state["gen_ctx"] = {
+                "scored_chunks": scored_chunks,
+                "outcomes": outcomes_dict,
+                "slots": list(st.session_state.slots),
+                "blueprint": list(st.session_state.slots),
+                "unit_sources": unit_sources,
+                "weights": st.session_state.get("target_weights"),
+                "client": client,
+                "client_config": {"use_mock": use_mock, "model_name": model_name},
+                "seed": 42,
+                "retry_count": 0,
+                "has_choice": preset_has_choice,
+                "selected_chapters": list(selected_chapters) if selected_chapters else [],
+                "active_units": list(active_units) if active_units else [],
+                "exclude_deprecated": exclude_deprecated,
+            }
+            st.session_state["regen_count"] = 0
             status_box.update(label="Question paper generated successfully!", state="complete", expanded=False)
 
 # -----------------------------------------------------------------------------
 # Stage 4: Results Display & Export (Step 1.2, 2.1, 2.2)
 # -----------------------------------------------------------------------------
 if st.session_state.results:
-    res = st.session_state.results
+    res = st.session_state.get("gen_result") or st.session_state.results
     questions = res.get("questions", [])
     unfilled = res.get("unfilled", [])
-    raw_chaps = res.get("covered_chapters", selected_chapters)
+    raw_chaps = res.get("covered_chapters") or (st.session_state.get("gen_ctx", {}) or {}).get("selected_chapters") or selected_chapters
     covered_chaps = [clean_book_name(ch) for ch in raw_chaps] if raw_chaps else []
+    paper_has_choice = (st.session_state.get("gen_ctx", {}) or {}).get("has_choice", preset_has_choice)
 
     st.subheader("📋 Generated Question Paper")
 
@@ -1477,25 +1521,34 @@ if st.session_state.results:
     # Problem 1.2: Completeness check and "Regenerate missing slots" button
     from generation.generator import regenerate_missing_slots, verify_paper_completeness
     is_complete, completeness_issues = verify_paper_completeness(st.session_state.slots, questions)
-    if not is_complete:
+    has_unfilled_slots = bool(unfilled) or (not is_complete)
+    if has_unfilled_slots:
         st.error(f"⚠️ **Paper Completeness Issues Detected ({len(completeness_issues)}):**")
         for iss in completeness_issues:
             st.markdown(f"- {iss}")
         col_reg1, col_reg2 = st.columns([2.5, 4.5])
         with col_reg1:
             if st.button("🔄 Regenerate missing slots", key="btn_regen_missing", use_container_width=True):
-                with st.spinner("Regenerating incomplete slots..."):
-                    regen_res = regenerate_missing_slots(
-                        questions=questions,
-                        slots=st.session_state.slots,
-                        chunks=scored_chunks,
-                        client=client,
-                        seed=42,
-                        unit_sources=unit_sources,
-                        outcomes=outcomes_dict,
-                    )
-                    st.session_state.results["questions"] = regen_res["questions"]
-                    st.rerun()
+                if not st.session_state.get("gen_ctx") or not (st.session_state.get("gen_result") or st.session_state.results):
+                    st.warning("⚠️ Generation context missing. Please click '🚀 Generate Question Paper' first.")
+                else:
+                    with st.spinner("🔄 Regenerating incomplete slots with expanded chunk pool..."):
+                        regen_count = st.session_state.get("regen_count", 0) + 1
+                        st.session_state["regen_count"] = regen_count
+                        try:
+                            current_gen_result = st.session_state.get("gen_result") or st.session_state.results
+                            regen_res = regenerate_missing_slots(
+                                ctx=st.session_state["gen_ctx"],
+                                result=current_gen_result,
+                                seed_bump=regen_count,
+                            )
+                            st.session_state["gen_result"] = regen_res
+                            st.session_state.results = regen_res
+                            if "gen_ctx" in st.session_state and isinstance(st.session_state["gen_ctx"], dict):
+                                st.session_state["gen_ctx"]["retry_count"] = regen_count
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Error regenerating missing slots: {ex}")
 
     # Problem 5.7: Faculty Review Panel for flagged slots
     flagged_slots = [q for q in questions if q.get("needs_review") or q.get("review_flags")]
@@ -1529,15 +1582,15 @@ if st.session_state.results:
             )
 
     if unfilled:
-        unfilled_details = ", ".join(
-            f"{u.get('co')} ({u.get('level')}, {u.get('knowledge_dimension', 'Conceptual')}, {u.get('marks')}m)" for u in unfilled
-        )
-        st.warning(
-            f"⚠️ Could not find suitable text or valid questions for {len(unfilled)} slot(s): "
-            f"**{unfilled_details}**.<br/>"
-            f"💡 *Note: These Course Outcomes (COs) might belong to textbook chapters that were excluded in your chapter selection.*",
-            icon="⚠️",
-        )
+        st.warning(f"⚠️ **{len(unfilled)} slot(s) could not be filled:**", icon="⚠️")
+        for u in unfilled:
+            u_id = u.get("id") or f"Slot {u.get('question_no', '')}"
+            u_unit = f"Unit {u.get('unit')} " if u.get('unit') is not None else ""
+            u_co = u.get("co", "")
+            u_reason = u.get("reason") or u.get("review_reason") or "No suitable content or validation failed"
+            u_hint = u.get("hint")
+            hint_str = f" Try: *{u_hint}*" if u_hint else ""
+            st.markdown(f"- **{u_unit}{u_id}** ({u_co}, {u.get('level', '')}, {u.get('marks', '')}m): {u_reason}.{hint_str}")
 
     if questions:
         table_data = [
@@ -1556,12 +1609,12 @@ if st.session_state.results:
         ]
         df = pd.DataFrame(table_data)
 
-        tab_label = "📄 Formatted Question Paper (Unit & Choice Layout)" if preset_has_choice else "📄 Formatted Question Paper (Unit Layout)"
+        tab_label = "📄 Formatted Question Paper (Unit & Choice Layout)" if paper_has_choice else "📄 Formatted Question Paper (Unit Layout)"
         tab_fmt, tab_tbl = st.tabs([tab_label, "📊 Detailed Table View"])
         with tab_fmt:
-            paper_hdr = "##### 📝 Exam Paper Layout (Internal Choice OR Format)" if preset_has_choice else "##### 📝 Exam Paper Layout"
+            paper_hdr = "##### 📝 Exam Paper Layout (Internal Choice OR Format)" if paper_has_choice else "##### 📝 Exam Paper Layout"
             st.markdown(paper_hdr)
-            st.code(format_paper(questions, has_choice=preset_has_choice), language="markdown")
+            st.code(format_paper(questions, has_choice=paper_has_choice), language="markdown")
         with tab_tbl:
             st.dataframe(
                 df,
@@ -1600,7 +1653,7 @@ if st.session_state.results:
         with col_opt2:
             ans_help = (
                 "Include verified model answers (with OR alternative format) in DOCX and PDF papers."
-                if preset_has_choice else
+                if paper_has_choice else
                 "Include verified model answers in DOCX and PDF papers."
             )
             include_answers = st.checkbox(
@@ -1618,7 +1671,7 @@ if st.session_state.results:
                 attempted_only=True,
             )
             with st.expander("📊 View Cumulative CO / BT Distribution Totals", expanded=False):
-                if preset_has_choice:
+                if paper_has_choice:
                     st.markdown(
                         f"**Total Attempted Marks:** `{totals_summary.get('total_marks', 0)}` | "
                         f"**Total Offered Marks:** `{totals_summary.get('offered_marks', 0)}`"
@@ -1630,8 +1683,9 @@ if st.session_state.results:
                 tbl_rows = totals_table_rows(totals_summary)
                 co_tbl = tbl_rows.get("co_table", [])
                 bt_tbl = tbl_rows.get("bt_table", [])
+                kd_tbl = tbl_rows.get("kd_table", [])
 
-                c_co, c_bt = st.columns(2)
+                c_co, c_bt, c_kd = st.columns(3)
                 with c_co:
                     st.markdown("**Course Outcomes (CO) Distribution:**")
                     if co_tbl:
@@ -1642,30 +1696,67 @@ if st.session_state.results:
                     if bt_tbl:
                         df_bt = pd.DataFrame(bt_tbl[1:], columns=bt_tbl[0])
                         st.dataframe(df_bt, hide_index=True, use_container_width=True)
+                with c_kd:
+                    st.markdown("**Knowledge Dimension (KD) Distribution:**")
+                    if kd_tbl:
+                        df_kd = pd.DataFrame(kd_tbl[1:], columns=kd_tbl[0])
+                        st.dataframe(df_kd, hide_index=True, use_container_width=True)
 
         outcomes_tuple = tuple(sorted(outcomes_map.items()))
         chaps_tuple = tuple(covered_chaps) if covered_chaps else None
-        docx_data = get_cached_docx_paper(
+
+        # Student Copy (Clean, Exam-Ready, no sources, no solutions)
+        student_docx = get_cached_docx_paper(
             questions_data=questions,
             course_name=course_title,
             subject_code=st.session_state.subject_code,
             outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
             covered_chaps_tuple=chaps_tuple,
-            include_answers=include_answers,
-            include_totals=add_totals,
+            include_answers=False,
+            include_totals=False,
             totals_summary_data=totals_summary,
+            profile="student",
         )
-        pdf_data = get_cached_pdf_paper(
+        student_pdf = get_cached_pdf_paper(
             questions_data=questions,
             course_name=course_title,
             subject_code=st.session_state.subject_code,
             outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
             covered_chaps_tuple=chaps_tuple,
-            include_answers=include_answers,
-            include_totals=add_totals,
+            include_answers=False,
+            include_totals=False,
             totals_summary_data=totals_summary,
+            profile="student",
+        )
+
+        # Faculty Copy (Includes solutions, sources, QA flags, KD/CO/BT totals)
+        faculty_docx = get_cached_docx_paper(
+            questions_data=questions,
+            course_name=course_title,
+            subject_code=st.session_state.subject_code,
+            outcomes_tuple=outcomes_tuple,
+            institution_name=st.session_state.institution_name,
+            covered_chaps_tuple=chaps_tuple,
+            include_answers=True,
+            include_totals=True,
+            totals_summary_data=totals_summary,
+            profile="faculty",
+            include_qa_flags=True,
+        )
+        faculty_pdf = get_cached_pdf_paper(
+            questions_data=questions,
+            course_name=course_title,
+            subject_code=st.session_state.subject_code,
+            outcomes_tuple=outcomes_tuple,
+            institution_name=st.session_state.institution_name,
+            covered_chaps_tuple=chaps_tuple,
+            include_answers=True,
+            include_totals=True,
+            totals_summary_data=totals_summary,
+            profile="faculty",
+            include_qa_flags=True,
         )
         csv_data = df.to_csv(index=False).encode("utf-8")
 
@@ -1684,36 +1775,72 @@ if st.session_state.results:
             if not can_download:
                 st.info("ℹ️ Check the box above to enable downloading this paper.")
 
-        col_docx, col_pdf, col_csv = st.columns([2.5, 2.5, 2])
-        with col_docx:
-            st.download_button(
-                label="📄 Download as Word (.docx)",
-                data=docx_data,
-                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary",
-                disabled=not can_download,
-                use_container_width=True,
-            )
-        with col_pdf:
-            st.download_button(
-                label="📑 Download as PDF (.pdf)",
-                data=pdf_data,
-                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.pdf",
-                mime="application/pdf",
-                type="primary",
-                disabled=not can_download,
-                use_container_width=True,
-            )
-        with col_csv:
-            st.download_button(
-                label="📊 Download as CSV (.csv)",
-                data=csv_data,
-                file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.csv",
-                mime="text/csv",
-                disabled=not can_download,
-                use_container_width=True,
-            )
+        tab_student, tab_faculty = st.tabs([
+            "🎓 Student Copy (Exam-Ready)",
+            "👨‍🏫 Faculty Copy (With Solutions & QA Flags)",
+        ])
+
+        with tab_student:
+            st.info("📌 **Student Copy:** Formal university exam layout with USN roll-number boxes, course code, time & marks instructions. Syllabus dump, source citations, answers, and internal analytics are omitted.")
+            col_s_docx, col_s_pdf = st.columns(2)
+            with col_s_docx:
+                st.download_button(
+                    label="📄 Download Student Paper (.docx)",
+                    data=student_docx,
+                    file_name=f"{course_title.replace(' ', '_')}_Student_Exam_Paper.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                    disabled=not can_download,
+                    use_container_width=True,
+                    key="dl_student_docx",
+                )
+            with col_s_pdf:
+                st.download_button(
+                    label="📑 Download Student Paper (.pdf)",
+                    data=student_pdf,
+                    file_name=f"{course_title.replace(' ', '_')}_Student_Exam_Paper.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    disabled=not can_download,
+                    use_container_width=True,
+                    key="dl_student_pdf",
+                )
+
+        with tab_faculty:
+            st.info("📌 **Faculty Copy:** Comprehensive master copy featuring mapped textbook sources, QA validation flags, itemized marking schemes & model solutions, and cumulative CO/BT/KD distributions.")
+            col_f_docx, col_f_pdf, col_f_csv = st.columns([2.5, 2.5, 2])
+            with col_f_docx:
+                st.download_button(
+                    label="📄 Download Faculty Master (.docx)",
+                    data=faculty_docx,
+                    file_name=f"{course_title.replace(' ', '_')}_Faculty_Master_Paper.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                    disabled=not can_download,
+                    use_container_width=True,
+                    key="dl_faculty_docx",
+                )
+            with col_f_pdf:
+                st.download_button(
+                    label="📑 Download Faculty Master (.pdf)",
+                    data=faculty_pdf,
+                    file_name=f"{course_title.replace(' ', '_')}_Faculty_Master_Paper.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    disabled=not can_download,
+                    use_container_width=True,
+                    key="dl_faculty_pdf",
+                )
+            with col_f_csv:
+                st.download_button(
+                    label="📊 Download Evaluation Data (.csv)",
+                    data=csv_data,
+                    file_name=f"{course_title.replace(' ', '_')}_Exam_Paper.csv",
+                    mime="text/csv",
+                    disabled=not can_download,
+                    use_container_width=True,
+                    key="dl_faculty_csv",
+                )
 
         with st.expander("🔍 View Technical Question Metadata & Evaluation Details"):
             st.json(questions)

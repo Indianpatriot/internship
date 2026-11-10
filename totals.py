@@ -10,6 +10,7 @@ Computes:
 from typing import Any, Optional
 
 from blooms.verb_bank import LEVELS
+from blooms.revised_taxonomy import normalize_knowledge_dimension, KNOWLEDGE_DIMENSIONS
 from contracts import Weights
 
 BT_BANDS = ["L1-L2", "L3-L4", "L5-L6"]
@@ -129,6 +130,11 @@ def summarize(
         band: {"marks": 0, "pct": 0.0, "questions": 0} for band in BT_BANDS
     }
 
+    # Initialize by_kd
+    by_kd: dict[str, dict[str, Any]] = {
+        kd: {"marks": 0, "pct": 0.0, "questions": 0} for kd in KNOWLEDGE_DIMENSIONS
+    }
+
     # Initialize by_co from questions and targets
     by_co: dict[str, dict[str, Any]] = {}
     if targets and "co" in targets and isinstance(targets["co"], dict):
@@ -140,6 +146,7 @@ def summarize(
         m = int(q.get("marks", 0))
         co = q.get("co", "CO1")
         lvl = q.get("level", "L1").upper()
+        kd = normalize_knowledge_dimension(q.get("knowledge_dimension") or q.get("kd"))
 
         # Update CO
         if co not in by_co:
@@ -158,6 +165,12 @@ def summarize(
         by_bt_band[band]["marks"] += m
         by_bt_band[band]["questions"] += 1
 
+        # Update KD
+        if kd not in by_kd:
+            by_kd[kd] = {"marks": 0, "pct": 0.0, "questions": 0}
+        by_kd[kd]["marks"] += m
+        by_kd[kd]["questions"] += 1
+
     # Compute percentages (guard against division by zero)
     if total_marks > 0:
         for co, data in by_co.items():
@@ -165,6 +178,8 @@ def summarize(
         for lvl, data in by_bt.items():
             data["pct"] = round((data["marks"] / total_marks) * 100, 2)
         for band, data in by_bt_band.items():
+            data["pct"] = round((data["marks"] / total_marks) * 100, 2)
+        for kd, data in by_kd.items():
             data["pct"] = round((data["marks"] / total_marks) * 100, 2)
 
     # Compute targets_diff if targets provided
@@ -193,6 +208,7 @@ def summarize(
         "by_co": by_co,
         "by_bt": by_bt,
         "by_bt_band": by_bt_band,
+        "by_kd": by_kd,
         "total_marks": total_marks,
         "offered_marks": offered_marks,
         "targets_diff": targets_diff,
@@ -206,7 +222,8 @@ def totals_table_rows(summary: dict[str, Any]) -> dict[str, list[list[Any]]]:
     Returns:
         {
             "co_table": [[header...], [row1...], ..., [total_row...]],
-            "bt_table": [[header...], [row1...], ..., [total_row...]]
+            "bt_table": [[header...], [row1...], ..., [total_row...]],
+            "kd_table": [[header...], [row1...], ..., [total_row...]],
         }
     """
     total_m = summary.get("total_marks", 0)
@@ -249,7 +266,20 @@ def totals_table_rows(summary: dict[str, Any]) -> dict[str, list[list[Any]]]:
     bt_total_row = ["Total", total_m, "100.0%" if total_m > 0 else "0.0%", total_bt_q]
     bt_table = [bt_header] + bt_rows + [bt_total_row]
 
+    # 3. Knowledge Dimension (KD) Table
+    kd_header = ["Knowledge Dimension", "Marks", "Percentage", "Questions Count"]
+    kd_rows = []
+    by_kd = summary.get("by_kd", {})
+    for kd in KNOWLEDGE_DIMENSIONS:
+        k_info = by_kd.get(kd, {"marks": 0, "pct": 0.0, "questions": 0})
+        kd_rows.append([kd, k_info["marks"], f"{k_info['pct']:.1f}%", k_info["questions"]])
+
+    total_kd_q = sum(k_info["questions"] for k_info in by_kd.values())
+    kd_total_row = ["Total", total_m, "100.0%" if total_m > 0 else "0.0%", total_kd_q]
+    kd_table = [kd_header] + kd_rows + [kd_total_row]
+
     return {
         "co_table": co_table,
         "bt_table": bt_table,
+        "kd_table": kd_table,
     }
