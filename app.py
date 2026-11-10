@@ -1167,8 +1167,11 @@ if uploaded_pdfs:
         manually_mapped = st.session_state.setdefault("manually_mapped_units", set())
         auto_suggested_units = st.session_state.setdefault("auto_suggested_units", set())
 
-        with st.expander("🗺️ Unit-to-Textbook Mapping (Optional)", expanded=(len(books) > 1)):
-            st.caption("Map which textbook(s) and chapter(s) each exam unit draws questions from.")
+        with st.expander("🗺️ Unit-to-Textbook Mapping (Optional)", expanded=False):
+            st.caption(
+                "**Optional:** Map specific textbook chapters to syllabus units to focus question generation. "
+                "Unmapped units automatically search across all available textbook content."
+            )
 
             # Show book-level fallback notices (e.g. pseudo-sections)
             for bid, binfo in books.items():
@@ -1246,9 +1249,9 @@ if uploaded_pdfs:
                     conf = meta.get("confidence", 0.0)
                     method = meta.get("method", "semantic+lexical")
                     if status == "suggested":
-                        st.warning(f"⚠️ Unit {u} was mapped with low confidence ({conf:.2f}) - please review and confirm the chapters.")
+                        st.caption(f"💡 Suggested mapping (confidence: {conf:.2f}). You can adjust or leave as is.")
                     elif status == "unmapped":
-                        st.error(f"❌ Unit {u} could not be mapped confidently. Please select chapters manually.")
+                        st.caption(f"ℹ️ Unit {u} is unmapped (optional). It will draw from all textbook content.")
                     elif status == "auto":
                         st.caption(f"✅ Auto-mapped via {method} (confidence: {conf:.2f})")
 
@@ -1287,17 +1290,16 @@ if uploaded_pdfs:
             for sw in source_warnings:
                 st.warning(f"⚠️ {sw}")
 
-        # Check for unmapped units and alert the user
+        # Soft hint for unmapped units (strictly optional, does not block generation)
         unmapped_units = [
             u for u in active_units
             if (updated_sources.get(u) is None or not any(bool(v) for v in (updated_sources[u] or {}).values() if v is not None))
             and u not in manually_mapped
         ]
         if unmapped_units and len(books) > 1:
-            st.warning(
-                f"ℹ️ Unit(s) {', '.join(map(str, unmapped_units))} are unmapped. "
-                f"Click '✨ Auto-fill mapping' above or select chapters manually. "
-                f"(Unmapped units will also be auto-filled upon generation)."
+            st.info(
+                f"💡 **Tip:** Units {', '.join(map(str, unmapped_units))} aren't mapped to textbook chapters. "
+                f"Mapping them can improve how closely questions match your textbook. This is optional."
             )
 
     else:
@@ -1349,6 +1351,8 @@ with col_gen_force:
 with col_gen_msg:
     if not outcomes_valid:
         st.caption(f"⚠️ {outcome_err_msg}")
+    elif unmapped_units and len(books) > 1:
+        st.caption("ℹ️ Unmapped units search across all textbook content.")
 
 if generate_clicked:
     if not uploaded_pdfs:
@@ -1360,46 +1364,6 @@ if generate_clicked:
     elif not filtered_chunks:
         st.error("No text chunks match your chapter/section selection.")
     else:
-        # Check if any active units are currently unmapped and attempt auto-fill before blocking
-        curr_sources = st.session_state.get("unit_sources") or {}
-        active_unmapped = [
-            u for u in active_units
-            if (curr_sources.get(u) is None or not any(bool(v) for v in (curr_sources[u] or {}).values() if v is not None))
-            and u not in st.session_state.get("manually_mapped_units", set())
-        ]
-        if active_unmapped and len(books) > 1:
-            client_to_use = MockClient() if use_mock else OllamaClient(model=model_name)
-            unit_descs = [
-                obj for obj in _get_unit_descriptors(active_units, st.session_state.scheme, st.session_state.slots, st.session_state.outcomes)
-                if obj.get("unit") in active_unmapped
-            ]
-            auto_res = auto_map_units_with_llm(
-                units=unit_descs,
-                library=library,
-                client=client_to_use,
-                min_confidence=0.50,
-                manually_mapped_units=st.session_state.get("manually_mapped_units", set()),
-            )
-            for u_num, info in auto_res.items():
-                if info.get("status") == "auto_suggested" and info.get("chapters"):
-                    curr_sources[u_num] = info["chapters"]
-                    st.session_state.setdefault("auto_suggested_units", set()).add(u_num)
-                    for bid in books:
-                        st.session_state[f"u_{u_num}_b_{bid}_chaps"] = info["chapters"].get(bid, [])
-            st.session_state.unit_sources = curr_sources
-
-        still_unmapped = [
-            u for u in active_units
-            if (st.session_state.unit_sources.get(u) is None or not any(bool(v) for v in (st.session_state.unit_sources[u] or {}).values() if v is not None))
-            and u not in st.session_state.get("manually_mapped_units", set())
-        ]
-        if still_unmapped and len(books) > 1:
-            st.error(
-                f"❌ Cannot generate question paper: Unit(s) {', '.join(map(str, still_unmapped))} are unmapped. "
-                f"Please select chapters manually in the Textbook Mapping section above."
-            )
-            st.stop()
-
         if not use_mock:
             probe_client = OllamaClient(model=model_name)
             if not probe_client.is_up():

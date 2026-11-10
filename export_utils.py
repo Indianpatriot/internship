@@ -36,7 +36,7 @@ HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8,64}[_\s\-]+", re.I)
 
 def clean_book_name(name: str) -> str:
     """Strip any leading hex hash (8-64 chars) and clean up book titles."""
-    if not name:
+    if not name or str(name).strip().lower() in ("none", "null", "undefined"):
         return ""
     s = str(name).strip()
     s = re.sub(r"^[•*–—\-]\s*", "", s).strip()

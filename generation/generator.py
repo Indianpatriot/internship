@@ -485,6 +485,8 @@ def generate_paper_by_slots(
 
         candidate_chunks = select_chunks_for_unit(usable, unit_sources, slot_unit)
         if not candidate_chunks:
+            candidate_chunks = usable
+        if not candidate_chunks:
             return {"status": "unfilled", "slot": slot, "rejected": [], "slot_idx": slot_idx}
 
         if alt_group:

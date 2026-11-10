@@ -177,3 +177,4 @@ def test_low_confidence_leaves_unit_unmapped(sample_library):
     assert res[1]["status"] == "unmapped"
     assert res[1]["chapters"] == {}
     assert "low confidence" in res[1]["warning"].lower()
+

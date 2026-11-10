@@ -63,6 +63,14 @@ def select_chunks_for_unit(
     if not sources_for_unit:
         return valid_chunks
 
+    # If no chapters are selected across any book, fall back to all valid chunks
+    has_any_selection = any(
+        (v is None or len(v) > 0) for v in sources_for_unit.values()
+    ) if isinstance(sources_for_unit, dict) else False
+
+    if not has_any_selection:
+        return valid_chunks
+
     filtered: list[dict[str, Any]] = []
     for c in valid_chunks:
         c_book = c.get("book_id")
@@ -89,4 +97,4 @@ def select_chunks_for_unit(
                 if matched:
                     filtered.append(c)
 
-    return filtered
+    return filtered if filtered else valid_chunks
