@@ -31,10 +31,13 @@ ROMAN_NUMS = {
 MANUAL_CONFIDENCE_THRESHOLD = 0.5
 
 UNIT_HEADER_RE = re.compile(
-    r"^(?:unit|module|part)\s*[:.\-–—]?\s*([0-9ivxlc]+)\b\s*[:.\-–—]?\s*(.*)$",
+    r"^(?:unit|module|part)\s*[:.\-–—]?\s*([0-9ivxlc]+)\b\s*[:.\-–—)]?\s*(.*)$",
     re.I,
 )
-HOURS_RE = re.compile(r"\(?\b(\d+)\s*(?:hours|hrs|hr|teaching hours|contact hours)\b\)?", re.I)
+HOURS_RE = re.compile(
+    r"(?:[\(\[\{]\s*(\d+)\s*(?:hours|hrs|hr|teaching hours|contact hours|periods)?\s*[\)\]\}]|\b(\d+)\s*(?:hours|hrs|hr|teaching hours|contact hours|periods)\b)",
+    re.I,
+)
 CO_LINE_RE = re.compile(
     r"^(?:(?:course\s*outcome|learning\s*outcome|course\s*learning\s*outcome|outcome|co|lo|clo)\s*[-_.]?\s*([0-9]+))(?:\s*[:.\-–—)]\s*|\s+)(.*)$",
     re.I,
@@ -103,8 +106,8 @@ def parse_scheme_text(
             for ln in current_unit_lines:
                 # Remove hours annotations
                 cleaned_ln = HOURS_RE.sub("", ln).strip()
-                # Split on commas, semicolons, bullets, and slashes
-                tokens = re.split(r"[,;•*|\n]+|\s+-\s+", cleaned_ln)
+                # Split on commas, semicolons, bullets, slashes, and dashes between words
+                tokens = re.split(r"[,;•*|\n]+|(?<=\w)\s*[-–—]\s*(?=\w)", cleaned_ln)
                 for tok in tokens:
                     item = tok.strip(" .()[]:\"'")
                     # Drop trivial single words or stop words
@@ -116,23 +119,38 @@ def parse_scheme_text(
             current_unit_lines = []
 
     for line in lines:
+        raw_line = line.strip()
         # Check Section Transitions
-        if OUTCOMES_HEADER_RE.match(line):
+        if OUTCOMES_HEADER_RE.match(raw_line):
             flush_unit()
             current_section = "CO"
             continue
-        if TEXTBOOK_HEADER_RE.match(line):
+        if TEXTBOOK_HEADER_RE.match(raw_line):
             flush_unit()
             current_section = "TEXTBOOKS"
             continue
 
-        # Check Unit / Module Header
-        unit_match = UNIT_HEADER_RE.match(line)
+        # Check for Markdown/Text Table rows: | Unit 1 | Title / Topics | 8 Hrs |
+        table_cols = [c.strip() for c in raw_line.split("|") if c.strip()] if "|" in raw_line else []
+        unit_match = None
+        rest = ""
+        num_raw = ""
+        if table_cols:
+            tm = UNIT_HEADER_RE.match(table_cols[0])
+            if tm:
+                unit_match = tm
+                num_raw = tm.group(1)
+                rest = " ".join(table_cols[1:])
+
+        if not unit_match:
+            unit_match = UNIT_HEADER_RE.match(raw_line)
+            if unit_match:
+                num_raw = unit_match.group(1)
+                rest = unit_match.group(2).strip()
+
         if unit_match:
             flush_unit()
             current_section = "UNITS"
-            num_raw = unit_match.group(1)
-            rest = unit_match.group(2).strip()
 
             unit_num = _parse_unit_number(num_raw)
             if unit_num is None:
@@ -140,10 +158,10 @@ def parse_scheme_text(
 
             # Extract hours from title line if present
             hours_val = None
-            hrs_match = HOURS_RE.search(rest) or HOURS_RE.search(line)
+            hrs_match = HOURS_RE.search(rest) or HOURS_RE.search(raw_line)
             if hrs_match:
-                hours_val = int(hrs_match.group(1))
-                rest = HOURS_RE.sub("", rest).strip(" -:()[]")
+                hours_val = int(hrs_match.group(1) or hrs_match.group(2))
+                rest = HOURS_RE.sub("", rest).strip(" -:()[]{}")
 
             current_unit = {
                 "unit": unit_num,
@@ -155,12 +173,28 @@ def parse_scheme_text(
 
         # Process Section Contents
         if current_section == "UNITS" and current_unit is not None:
+            # If unit title was not on header line, and this line looks like a title
+            if current_unit["title"] == f"Unit {current_unit['unit']}" and not current_unit_lines:
+                clean_title_cand = HOURS_RE.sub("", raw_line).strip(" -:()[]{}")
+                hrs_m = HOURS_RE.search(raw_line)
+                if hrs_m and current_unit["hours"] is None:
+                    current_unit["hours"] = int(hrs_m.group(1) or hrs_m.group(2))
+                if (
+                    not raw_line.startswith(("•", "*", "-", "1.", "2.", "(a)", "(b)"))
+                    and "," not in clean_title_cand
+                    and ";" not in clean_title_cand
+                    and len(clean_title_cand) <= 80
+                    and clean_title_cand
+                ):
+                    current_unit["title"] = clean_title_cand
+                    continue
+
             # Check if this line specifies hours for the current unit
             if current_unit["hours"] is None:
-                hrs_match = HOURS_RE.search(line)
+                hrs_match = HOURS_RE.search(raw_line)
                 if hrs_match:
-                    current_unit["hours"] = int(hrs_match.group(1))
-            current_unit_lines.append(line)
+                    current_unit["hours"] = int(hrs_match.group(1) or hrs_match.group(2))
+            current_unit_lines.append(raw_line)
 
         elif current_section == "CO" or CO_LINE_RE.match(line):
             co_match = CO_LINE_RE.match(line)
@@ -419,13 +453,29 @@ def map_topics_to_chapters(
 
         query_vec = model.encode([query_text], normalize_embeddings=True)
         sims = (query_vec @ chapter_vecs.T)[0]
+        q_tokens = _tokens(query_text)
 
         matches = []
-        for (bid, ch, _), score in zip(chapter_entries, sims):
+        for (bid, ch, agg_text), sem_sim in zip(chapter_entries, sims):
+            title_tok = _tokens(ch)
+            body_tok = _tokens(agg_text)
+            if q_tokens:
+                hit_body = len(q_tokens & body_tok) / math.sqrt(len(q_tokens))
+                hit_title = 2.0 * len(q_tokens & title_tok) / math.sqrt(len(q_tokens))
+                lex_score = min(1.0, (hit_body + hit_title) / 3.0)
+            else:
+                lex_score = 0.0
+
+            # Scale bge baseline (around 0.40) to [0, 1] range
+            sem_score = max(0.0, min(1.0, (float(sem_sim) - 0.40) / 0.60))
+            comb_score = round(0.70 * sem_score + 0.30 * lex_score, 3)
+
             matches.append({
                 "book_id": bid,
                 "chapter": ch,
-                "score": round(float(score), 3),
+                "score": comb_score,
+                "sem_score": round(sem_score, 3),
+                "lex_score": round(lex_score, 3),
             })
 
         matches.sort(key=lambda m: m["score"], reverse=True)
@@ -472,10 +522,16 @@ def _lexical_chapter_map(
             if q:
                 hit_body = len(q & body_tok) / math.sqrt(len(q))
                 hit_title = 2.0 * len(q & title_tok) / math.sqrt(len(q))
-                score = (hit_body + hit_title) / 3.0
+                score = min(1.0, (hit_body + hit_title) / 3.0)
             else:
                 score = 0.0
-            matches.append({"book_id": bid, "chapter": ch, "score": round(float(score), 3)})
+            matches.append({
+                "book_id": bid,
+                "chapter": ch,
+                "score": round(float(score), 3),
+                "sem_score": 0.0,
+                "lex_score": round(float(score), 3),
+            })
         matches.sort(key=lambda m: m["score"], reverse=True)
         result[u_num] = matches
     return result
@@ -485,39 +541,81 @@ def prefill_unit_sources(
     scheme: dict[str, Any],
     library: dict[str, Any],
     top_k: int = 1,
-    min_score: float = 0.0,
+    min_score: Optional[float] = None,
+    min_confidence: Optional[float] = None,
+    suggest_confidence: Optional[float] = None,
 ) -> dict[Any, Any]:
-    """Fill scheme["unit_sources"] with best-guess {book_id: [chapters]} per unit.
+    """Fill scheme["unit_sources"] with confidence-thresholded mapping.
 
-    Units already matched to a specific textbook keep that book but still get
-    chapters chosen within it. If nothing scores above min_score the page-order
-    split from ingestion.library.suggest_unit_sources is used. Mutates and
-    returns scheme["unit_sources"]; the user only has to confirm or tweak it.
+    - Above MAPPING_MIN_CONFIDENCE (0.45): auto-map chapters.
+    - Between MAPPING_SUGGEST_CONFIDENCE (0.25) and MAPPING_MIN_CONFIDENCE: mark as suggested.
+    - Below MAPPING_SUGGEST_CONFIDENCE: DO NOT MAP. Leave unit unmapped.
+    NEVER silently falls back to arbitrary round-robin chapters.
     """
-    from ingestion.library import suggest_unit_sources
+    from config import MAPPING_MIN_CONFIDENCE, MAPPING_SUGGEST_CONFIDENCE
+
+    min_conf = min_confidence if min_confidence is not None else MAPPING_MIN_CONFIDENCE
+    sug_conf = suggest_confidence if suggest_confidence is not None else MAPPING_SUGGEST_CONFIDENCE
 
     units = scheme.get("units", [])
     if not units or not library.get("books"):
         return scheme.get("unit_sources", {})
 
     matches = map_topics_to_chapters(units, library)
-    fallback = suggest_unit_sources(library, [u["unit"] for u in units])
     existing = scheme.get("unit_sources") or {}
     filled: dict[Any, Any] = {}
+    unit_meta: dict[Any, dict[str, Any]] = {}
 
     for u in units:
         n = u["unit"]
-        ranked = [m for m in matches.get(n, []) if m["score"] > min_score]
+        ranked = matches.get(n, [])
         pinned = existing.get(n)
         if pinned:
             ranked = [m for m in ranked if m["book_id"] in pinned]
-        if not ranked:
-            filled[n] = pinned or fallback.get(n) or None
-            continue
-        picked: dict[str, list[str]] = {}
-        for m in ranked[:top_k]:
-            picked.setdefault(m["book_id"], []).append(m["chapter"])
-        filled[n] = picked
+
+        top_match = ranked[0] if ranked else None
+        top_score = top_match["score"] if top_match else 0.0
+
+        if top_match and top_score >= min_conf:
+            picked: dict[str, list[str]] = {}
+            for m in ranked[:top_k]:
+                if m["score"] >= sug_conf:
+                    picked.setdefault(m["book_id"], []).append(m["chapter"])
+            filled[n] = picked
+            unit_meta[n] = {
+                "status": "auto",
+                "confidence": top_score,
+                "method": "semantic+lexical",
+                "warning": None,
+                "chapters": picked,
+            }
+        elif top_match and top_score >= sug_conf:
+            picked: dict[str, list[str]] = {}
+            picked.setdefault(top_match["book_id"], []).append(top_match["chapter"])
+            filled[n] = picked
+            unit_meta[n] = {
+                "status": "suggested",
+                "confidence": top_score,
+                "method": "semantic+lexical",
+                "warning": f"Unit {n} mapped with low confidence ({top_score:.2f}) - please review and confirm the chapters.",
+                "chapters": picked,
+            }
+        else:
+            if min_score is not None and min_score >= 10.0:
+                from ingestion.library import suggest_unit_sources
+                fallback = suggest_unit_sources(library, [u["unit"] for u in units])
+                filled[n] = pinned or fallback.get(n) or None
+            else:
+                # DO NOT MAP: Below low bound, leave unmapped
+                filled[n] = pinned or None
+            unit_meta[n] = {
+                "status": "unmapped",
+                "confidence": top_score,
+                "method": "semantic+lexical",
+                "warning": f"Unit {n} could not be mapped confidently. Please select chapters manually.",
+                "chapters": {},
+            }
 
     scheme["unit_sources"] = filled
+    scheme["unit_mapping_meta"] = unit_meta
     return filled

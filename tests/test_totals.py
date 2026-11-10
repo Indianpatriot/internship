@@ -141,8 +141,8 @@ def test_end_to_end_library_scheme_generation_totals(tmp_path):
         for ch in [1, 2, 3]:
             page = doc.new_page()
             page.insert_text((50, 72), f"Chapter {ch}: Fundamentals of {title}", fontsize=16)
-            page.insert_text(
-                (50, 120),
+            page.insert_textbox(
+                fitz.Rect(50, 100, 550, 400),
                 (
                     f"In this chapter {ch} of {title}, students explore algorithmic paradigms, structures, and systems. "
                     "Invariants are analyzed across recursive divisions and state transitions systematically. "

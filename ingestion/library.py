@@ -19,7 +19,8 @@ from ingestion.pipeline import ingest
 from retrieval.sources import select_chunks_for_unit
 
 CACHE_DIR = Path(".cache/ingestion")
-FILTER_VERSION = "pf_v4"
+FILTER_VERSION = "pf_v5"
+DETECTION_VERSION = "hd_v2"
 HEX_HASH_PREFIX_RE = re.compile(r"^[0-9a-f]{8,64}[_-]+", re.I)
 
 
@@ -90,7 +91,7 @@ def add_book(
 
     cdir = Path(cache_dir) if cache_dir else CACHE_DIR
     cfg_slug = f"w{MAX_CHUNK_WORDS}_o{OVERLAP_WORDS}_m{MIN_CHUNK_WORDS}"
-    cache_file = cdir / f"{bid}_{file_hash}_{FILTER_VERSION}_{cfg_slug}.json"
+    cache_file = cdir / f"{bid}_{file_hash}_{FILTER_VERSION}_{DETECTION_VERSION}_{cfg_slug}.json"
 
     if cache_file.exists():
         try:
@@ -188,7 +189,13 @@ def load_library(
         from ingestion.heading_detect import is_non_content_title, normalize_chapter_title
         ordered_chapters: list[str] = []
         seen_ch_lower: set[str] = set()
+        det_method = "body_headings"
+        det_conf = 0.70
         for c in chunks:
+            if c.get("detection_method"):
+                det_method = c["detection_method"]
+            if c.get("detection_confidence") is not None:
+                det_conf = float(c["detection_confidence"])
             raw_ch = c.get("chapter")
             if raw_ch:
                 norm_ch = normalize_chapter_title(raw_ch)
@@ -201,6 +208,7 @@ def load_library(
 
         min_page = min((c.get("page_start", 1) for c in chunks), default=1)
         max_page = max((c.get("page_end", 1) for c in chunks), default=1)
+        is_pseudo = (det_method in ("semantic_page_windows", "page_range") or any(ch.startswith("Pages ") for ch in ordered_chapters))
 
         books[assigned_id] = {
             "title": title,
@@ -210,6 +218,9 @@ def load_library(
             "chapters": ordered_chapters,
             "n_chunks": len(chunks),
             "page_range": (min_page, max_page),
+            "detection_method": det_method,
+            "detection_confidence": det_conf,
+            "is_pseudo_sections": is_pseudo,
         }
         all_chunks.extend(chunks)
 

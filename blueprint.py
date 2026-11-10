@@ -200,7 +200,7 @@ def build_blueprint(
         num_units = len(preset.units)
         unit_list = [u.unit for u in preset.units]
         q_per_unit = max((len(u.options) for u in preset.units), default=2)
-        is_choice = True
+        is_choice = getattr(preset, "has_choice", q_per_unit > 1)
         expected_q_marks = preset.units[0].options[0].marks if preset.units and preset.units[0].options else 20
         attempted_marks_pool = preset.attempt_marks
         preset_config = {
@@ -208,7 +208,7 @@ def build_blueprint(
             "units": num_units,
             "questions_per_unit": q_per_unit,
             "question_marks": expected_q_marks,
-            "is_choice": True,
+            "is_choice": is_choice,
         }
     else:
         selected_preset_key = None

@@ -34,4 +34,8 @@ ENABLE_GENERATION_CACHE = os.getenv("ENABLE_GENERATION_CACHE", "true").lower() i
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
 
+# Topic to Chapter Mapping Confidence Thresholds
+MAPPING_MIN_CONFIDENCE = float(os.getenv("MAPPING_MIN_CONFIDENCE", "0.45"))
+MAPPING_SUGGEST_CONFIDENCE = float(os.getenv("MAPPING_SUGGEST_CONFIDENCE", "0.25"))
+
 

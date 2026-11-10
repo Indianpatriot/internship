@@ -35,6 +35,7 @@ class UnitPlan:
 class PaperPreset:
     name: str
     units: list[UnitPlan]
+    has_choice: bool = True
 
     def validate(self):
         for u in self.units:
@@ -49,13 +50,22 @@ class PaperPreset:
         return sum(q.marks for u in self.units for q in u.options)
 
 
-def make_preset(name: str, units: int = 5, marks_per_unit: int = 20, options: int = 2, sub_marks: Optional[dict[int, list[int]]] = None) -> PaperPreset:
+def make_preset(
+    name: str,
+    units: int = 5,
+    marks_per_unit: int = 20,
+    options: int = 2,
+    sub_marks: Optional[dict[int, list[int]]] = None,
+    has_choice: Optional[bool] = None,
+) -> PaperPreset:
     """Create a PaperPreset with uniform or customized sub-question marks per unit.
 
     sub_marks: optional {unit_no: [m1, m2, ...]} to split each question of that unit.
                Empty list [] or omitted unit means a single question with no sub-parts.
     """
     sub_marks = sub_marks or {}
+    if has_choice is None:
+        has_choice = "100" in name or "Choice" in name or (options > 1 and "50" not in name and "25" not in name)
     plan = [
         UnitPlan(
             unit=n,
@@ -63,18 +73,22 @@ def make_preset(name: str, units: int = 5, marks_per_unit: int = 20, options: in
         )
         for n in range(1, units + 1)
     ]
-    p = PaperPreset(name, plan)
+    p = PaperPreset(name, plan, has_choice=has_choice)
     p.validate()
     return p
 
 
 PRESETS: dict[str, PaperPreset] = {
-    "100 marks": make_preset("100 marks", units=5, marks_per_unit=20),
-    "50 marks":  make_preset("50 marks",  units=5, marks_per_unit=10),
+    "100 marks": make_preset("100 marks", units=5, marks_per_unit=20, has_choice=True),
+    "100 Marks (Choice)": make_preset("100 Marks (Choice)", units=5, marks_per_unit=20, has_choice=True),
+    "50 marks":  make_preset("50 marks",  units=5, marks_per_unit=10, has_choice=False),
+    "50 Marks (Standard)": make_preset("50 Marks (Standard)", units=5, marks_per_unit=10, has_choice=False),
+    "25 Marks (Internal Assessment)": make_preset("25 Marks (Internal Assessment)", units=5, marks_per_unit=5, has_choice=False),
+    "Custom Blueprint": make_preset("Custom Blueprint", units=5, marks_per_unit=20, has_choice=True),
 }
 
 
-def format_paper(questions: list[dict[str, Any]]) -> str:
+def format_paper(questions: list[dict[str, Any]], has_choice: Optional[bool] = None) -> str:
     """Render question paper into academic unit layout format.
 
     Format:
@@ -90,6 +104,15 @@ def format_paper(questions: list[dict[str, Any]]) -> str:
     """
     if not questions:
         return ""
+
+    if has_choice is None:
+        has_choice = any(bool(q.get("alternative_group")) for q in questions)
+        if not has_choice:
+            by_u = {}
+            for q in questions:
+                by_u.setdefault(q.get("unit", 1), set()).add(q.get("question_no", 1))
+            if any(len(qs) > 1 for qs in by_u.values()):
+                has_choice = True
 
     # Group by unit, preserving order
     units_order: list[Any] = []
@@ -118,7 +141,7 @@ def format_paper(questions: list[dict[str, Any]]) -> str:
 
         for q_idx, q_no in enumerate(q_order):
             subs = by_q_no[q_no]
-            if q_idx > 0:
+            if q_idx > 0 and has_choice:
                 lines.append("                     OR")
 
             has_subparts = len(subs) > 1 or (

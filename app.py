@@ -518,9 +518,18 @@ with col_preset:
         help="Select 50-mark standard exam, 100-mark exam with internal choice, or custom structure.",
     )
 
-is_100_choice = "100" in selected_preset
-target_unit_marks = 20 if is_100_choice else (10 if "50" in selected_preset else 20)
-num_preset_units = 5
+current_preset = PAPER_PRESETS.get(
+    selected_preset,
+    make_preset(selected_preset, marks_per_unit=20, has_choice=("100" in selected_preset)),
+)
+preset_has_choice = bool(getattr(current_preset, "has_choice", False))
+
+target_unit_marks = (
+    current_preset.units[0].options[0].marks
+    if current_preset.units and current_preset.units[0].options
+    else (20 if preset_has_choice else (10 if "50" in selected_preset else (5 if "25" in selected_preset else 20)))
+)
+num_preset_units = len(current_preset.units) if current_preset.units else 5
 
 # Reset sub-question marks defaults if target_unit_marks changes
 prev_target_marks = st.session_state.get("_prev_target_unit_marks")
@@ -529,6 +538,35 @@ if prev_target_marks != target_unit_marks:
     for u in range(1, num_preset_units + 1):
         if f"unit_{u}_marks_input" in st.session_state:
             del st.session_state[f"unit_{u}_marks_input"]
+
+# Switching between presets updates the UI immediately with no leftover choice elements
+prev_active_preset = st.session_state.get("_active_preset_name")
+if prev_active_preset is not None and prev_active_preset != selected_preset:
+    st.session_state._active_preset_name = selected_preset
+    st.session_state.slots_version = st.session_state.get("slots_version", 0) + 1
+    for k in list(st.session_state.keys()):
+        if k.startswith("slot_") or (k.startswith("unit_") and k.endswith("_marks_input")):
+            del st.session_state[k]
+
+    if not preset_has_choice:
+        if "25" in selected_preset:
+            st.session_state.slots = get_25_mark_blueprint(available_cos)
+            st.session_state.selected_preset_idx = 2
+        else:
+            st.session_state.slots = get_50_mark_blueprint(available_cos)
+            st.session_state.selected_preset_idx = 0
+    else:
+        st.session_state.selected_preset_idx = 1 if "100" in selected_preset else 3
+        p_obj = PAPER_PRESETS.get(
+            selected_preset,
+            make_preset(selected_preset, units=num_preset_units, marks_per_unit=target_unit_marks, has_choice=True),
+        )
+        bp = build_blueprint(preset=p_obj, outcomes=available_cos, seed=42)
+        st.session_state.slots = bp["slots"]
+    st.session_state.bp_warnings = []
+    st.rerun()
+elif prev_active_preset is None:
+    st.session_state._active_preset_name = selected_preset
 
 with col_subq:
     sub_questions_input = st.number_input(
@@ -546,7 +584,7 @@ unit_sub_marks: dict[int, list[int]] = {}
 unit_structure_valid = True
 unit_validation_errors: list[str] = []
 
-with st.expander("📐 Configure Questions & Sub-questions Per Unit", expanded=is_100_choice):
+with st.expander("📐 Configure Questions & Sub-questions Per Unit", expanded=preset_has_choice):
     st.caption(
         f"For each unit, configure the **number of sub-questions** (0 for none) and the **marks of each**, "
         f"with a live check that marks add up to the unit total ({target_unit_marks} marks)."
@@ -562,7 +600,7 @@ with st.expander("📐 Configure Questions & Sub-questions Per Unit", expanded=i
         u_c1, u_c2, u_c3, u_c4 = st.columns([1.2, 1.6, 2.4, 2.2])
         with u_c1:
             st.markdown(f"**Unit {u}**")
-            st.caption(f"{target_unit_marks}m / option")
+            st.caption(f"{target_unit_marks}m" if not preset_has_choice else f"{target_unit_marks}m / option")
 
         with u_c2:
             sq_cnt = st.number_input(
@@ -715,8 +753,9 @@ with col_p1:
                         name=selected_preset,
                         units=num_preset_units,
                         marks_per_unit=target_unit_marks,
-                        options=2 if (is_100_choice or "Custom" in selected_preset) else 1,
+                        options=2 if preset_has_choice else 1,
                         sub_marks=unit_sub_marks,
+                        has_choice=preset_has_choice,
                     )
                     bp = build_blueprint(
                         preset=preset_obj,
@@ -726,7 +765,7 @@ with col_p1:
                         seed=42,
                     )
                     st.session_state.slots = bp["slots"]
-                    st.session_state.selected_preset_idx = 1 if is_100_choice else (0 if "50" in selected_preset else 3)
+                    st.session_state.selected_preset_idx = 1 if preset_has_choice else (0 if "50" in selected_preset else 3)
                     st.session_state.bp_warnings = bp.get("warnings", [])
 
                 # Clear stale slot widget keys and bump version
@@ -775,7 +814,7 @@ stats = calculate_blueprint_stats(st.session_state.slots)
 total_marks = stats["total_marks"]
 attempted_m = stats.get("attempted_marks", total_marks)
 offered_m = stats.get("offered_marks", total_marks)
-is_choice_paper = stats.get("is_choice", False)
+is_choice_paper = stats.get("is_choice", False) and preset_has_choice
 
 if is_choice_paper:
     mark_target_label = f"Attempted: {attempted_m}m / Offered: {offered_m}m"
@@ -1100,13 +1139,35 @@ if uploaded_pdfs:
             elif len(books) > 1:
                 st.session_state.unit_sources = suggest_unit_sources(library, active_units)
 
+        mapping_meta = (st.session_state.scheme.get("unit_mapping_meta") or {}) if st.session_state.scheme else {}
+        manually_mapped = st.session_state.setdefault("manually_mapped_units", set())
+
         with st.expander("🗺️ Unit-to-Textbook Mapping (Optional)", expanded=(len(books) > 1)):
             st.caption("Map which textbook(s) and chapter(s) each exam unit draws questions from.")
+
+            # Show book-level fallback notices (e.g. pseudo-sections)
+            for bid, binfo in books.items():
+                if binfo.get("is_pseudo_sections"):
+                    st.warning(f"⚠️ Could not detect chapters for '{binfo.get('title', bid)}'; partitioned by topic into estimated sections Pages X-Y. Please verify.")
+
             current_sources = st.session_state.get("unit_sources") or {}
             updated_sources = {}
             for u in active_units:
                 u_sources = current_sources.get(u) or {}
+                meta = mapping_meta.get(u, {})
                 st.markdown(f"**Unit {u} Sources:**")
+
+                if meta:
+                    status = meta.get("status")
+                    conf = meta.get("confidence", 0.0)
+                    method = meta.get("method", "semantic+lexical")
+                    if status == "suggested":
+                        st.warning(f"⚠️ Unit {u} was mapped with low confidence ({conf:.2f}) - please review and confirm the chapters.")
+                    elif status == "unmapped" and u not in manually_mapped:
+                        st.error(f"❌ Unit {u} could not be mapped confidently. Please select chapters manually.")
+                    elif status == "auto":
+                        st.caption(f"✅ Auto-mapped via {method} (confidence: {conf:.2f})")
+
                 u_b_cols = st.columns(min(max(len(books), 1), 3))
                 unit_book_map = {}
                 for b_idx, (bid, binfo) in enumerate(books.items()):
@@ -1122,17 +1183,37 @@ if uploaded_pdfs:
                             key=f"u_{u}_b_{bid}_chaps",
                             help=f"Select chapters in {book_lbl} for Unit {u}. Leave empty to exclude this book from Unit {u}.",
                         )
+                        if set(sel_for_b) != set(valid_def):
+                            manually_mapped.add(u)
                         if sel_for_b:
                             unit_book_map[bid] = sel_for_b
                 if unit_book_map:
                     updated_sources[u] = unit_book_map
                 else:
-                    updated_sources[u] = {bid: None for bid in books}
+                    if meta.get("status") == "unmapped" and u not in manually_mapped:
+                        updated_sources[u] = None
+                    elif len(books) > 1:
+                        updated_sources[u] = None
+                    else:
+                        updated_sources[u] = {bid: None for bid in books}
 
             st.session_state.unit_sources = updated_sources
             source_warnings = validate_unit_sources(library, updated_sources)
             for sw in source_warnings:
                 st.warning(f"⚠️ {sw}")
+
+        # Check for unmapped units and block generation if any active unit is unmapped
+        unmapped_units = [
+            u for u in active_units
+            if (updated_sources.get(u) is None or not any(bool(v) for v in (updated_sources[u] or {}).values() if v is not None))
+            and u not in manually_mapped
+        ]
+        if unmapped_units and len(books) > 1:
+            can_generate = False
+            st.error(
+                f"❌ Cannot generate question paper: Unit(s) {', '.join(map(str, unmapped_units))} are unmapped. "
+                f"Please select chapters manually in the Textbook Mapping section above."
+            )
 
     else:
         st.warning("⚠️ No chapter headings detected in document TOC. Falling back to page range selection.")
@@ -1294,10 +1375,12 @@ if st.session_state.results:
         ]
         df = pd.DataFrame(table_data)
 
-        tab_fmt, tab_tbl = st.tabs(["📄 Formatted Question Paper (Unit & Choice Layout)", "📊 Detailed Table View"])
+        tab_label = "📄 Formatted Question Paper (Unit & Choice Layout)" if preset_has_choice else "📄 Formatted Question Paper (Unit Layout)"
+        tab_fmt, tab_tbl = st.tabs([tab_label, "📊 Detailed Table View"])
         with tab_fmt:
-            st.markdown("##### 📝 Exam Paper Layout (Internal Choice OR Format)")
-            st.code(format_paper(questions), language="markdown")
+            paper_hdr = "##### 📝 Exam Paper Layout (Internal Choice OR Format)" if preset_has_choice else "##### 📝 Exam Paper Layout"
+            st.markdown(paper_hdr)
+            st.code(format_paper(questions, has_choice=preset_has_choice), language="markdown")
         with tab_tbl:
             st.dataframe(
                 df,
@@ -1334,10 +1417,15 @@ if st.session_state.results:
                 help="Append cumulative Course Outcome (CO) and Bloom's Taxonomy (BT) distribution tables to DOCX, PDF, and UI summary.",
             )
         with col_opt2:
+            ans_help = (
+                "Include verified model answers (with OR alternative format) in DOCX and PDF papers."
+                if preset_has_choice else
+                "Include verified model answers in DOCX and PDF papers."
+            )
             include_answers = st.checkbox(
                 "Include Model Answers & Scheme of Evaluation",
                 value=True,
-                help="Include verified model answers (with OR alternative format) in DOCX and PDF papers.",
+                help=ans_help,
             )
 
         # Calculate totals summary if requested
@@ -1349,10 +1437,15 @@ if st.session_state.results:
                 attempted_only=True,
             )
             with st.expander("📊 View Cumulative CO / BT Distribution Totals", expanded=False):
-                st.markdown(
-                    f"**Total Attempted Marks:** `{totals_summary.get('total_marks', 0)}` | "
-                    f"**Total Offered Marks:** `{totals_summary.get('offered_marks', 0)}`"
-                )
+                if preset_has_choice:
+                    st.markdown(
+                        f"**Total Attempted Marks:** `{totals_summary.get('total_marks', 0)}` | "
+                        f"**Total Offered Marks:** `{totals_summary.get('offered_marks', 0)}`"
+                    )
+                else:
+                    st.markdown(
+                        f"**Total Marks:** `{totals_summary.get('total_marks', 0)}`"
+                    )
                 tbl_rows = totals_table_rows(totals_summary)
                 co_tbl = tbl_rows.get("co_table", [])
                 bt_tbl = tbl_rows.get("bt_table", [])

@@ -6,6 +6,7 @@ import fitz  # PyMuPDF
 
 BOLD_FLAG = 16
 PAGE_NUM_RE = re.compile(r"^(page\s*)?\d+(\s*(/|of)\s*\d+)?$", re.I)
+CHAPTER_RE = re.compile(r"^(chapter|unit|module|part)\s+([0-9ivxlc]+|[a-z]+)\b", re.I)
 
 
 def _norm(text: str) -> str:
@@ -50,6 +51,9 @@ def strip_margins(lines, n_pages, margin=0.08, repeat_ratio=0.3):
     for l in lines:
         if in_margin(l):
             if PAGE_NUM_RE.match(l["text"].strip()):
+                continue
+            if CHAPTER_RE.match(l["text"].strip()):
+                kept.append(l)
                 continue
             if n_pages >= 3 and cnt[_norm(l["text"])] >= threshold:
                 continue

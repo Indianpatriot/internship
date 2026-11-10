@@ -132,6 +132,16 @@ def _format_question_with_verb(verb: str, concept: str) -> str:
         return f"{V} a robust modular pipeline integrating {concept} seamlessly?"
     elif v in {"generate", "create"}:
         return f"{V} novel test scenarios and synthetic artifacts reflecting {concept}?"
+    elif v in {"predict", "infer", "forecast"}:
+        return f"{V} the likely outcomes and behavioral effects stemming from {concept}?"
+    elif v in {"relate", "connect", "associate"}:
+        return f"{V} the interconnections, context, and dependencies linking {concept}?"
+    elif v in {"show", "display", "present"}:
+        return f"{V} clear evidence and practical manifestations exemplifying {concept}?"
+    elif v in {"recommend", "advise", "suggest"}:
+        return f"{V} prioritized strategies and best practices regarding {concept}?"
+    elif v in {"summarize", "outline"}:
+        return f"{V} a concise overview highlighting the essential tenets of {concept}?"
     else:
         return f"{V} the underlying mechanisms and significance of {concept}?"
 

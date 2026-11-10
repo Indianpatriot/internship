@@ -44,6 +44,10 @@ def clean_book_name(name: str) -> str:
     s = re.sub(r"\b[0-9a-fA-F]{8,64}\b\s*[:_\-\s]*", "", s).strip()
     if "_" in s and " " not in s:
         s = s.replace("_", " ")
+    if re.match(r"^chapter:\s*pages\s+\d+", s, re.IGNORECASE):
+        s = re.sub(r"^chapter:\s*", "Section: ", s, flags=re.IGNORECASE)
+    elif re.match(r"^pages\s+\d+", s, re.IGNORECASE):
+        s = f"Section: {s}"
     return re.sub(r"\s+", " ", s).strip()
 
 

@@ -532,6 +532,8 @@ def test_quality_problem2_source_labels_and_chapter_dedup():
     from export_utils import clean_book_name
     assert clean_book_name("6a1831f8f825_Docker_In_Practice") == "Docker In Practice"
     assert clean_book_name("• 6a1831f8f825: 1. Docker In Practice") == "1. Docker In Practice"
+    assert clean_book_name("Chapter: Pages 1-10: Foundations") == "Section: Pages 1-10: Foundations"
+    assert clean_book_name("Pages 1-10: Foundations") == "Section: Pages 1-10: Foundations"
 
 
 def test_quality_problem3_hex_prefix_cleanup():
@@ -730,5 +732,215 @@ def test_clean_book_name_not_shadowed_in_app():
     assert "clean_book_name" not in assigned_targets, (
         "clean_book_name imported function is shadowed by a variable assignment in app.py"
     )
+
+
+def test_change1_layered_heading_detection():
+    """Change 1: Layered heading detection (Layer 1 outline -> Layer 2 TOC pages -> Layer 3 body -> Layer 4 pseudo-sections)."""
+    from ingestion.heading_detect import detect_headings
+
+    # Layer 1: Clean outline TOC
+    lines_l1 = [
+        {"page": 1, "text": "Chapter 1 Introduction to Containers", "size": 18, "bold": True},
+        {"page": 1, "text": "Containers package software dependencies.", "size": 11, "bold": False},
+        {"page": 15, "text": "Chapter 2 Kubernetes Pod Architecture", "size": 18, "bold": True},
+        {"page": 15, "text": "Pods are the smallest schedulable units.", "size": 11, "bold": False},
+    ]
+    toc_l1 = [
+        [1, "Chapter 1 Introduction to Containers", 1],
+        [1, "Chapter 2 Kubernetes Pod Architecture", 15],
+    ]
+    heads_l1 = detect_headings(lines_l1, toc=toc_l1, n_pages=20)
+    assert len(heads_l1) == 2
+    assert heads_l1[0]["method"] == "pdf_outline"
+    assert heads_l1[0]["confidence"] == 0.95
+
+    # Layer 2: TOC parsed from TOC pages in body
+    lines_l2 = [
+        {"page": 2, "text": "Table of Contents", "size": 16, "bold": True},
+        {"page": 2, "text": "Chapter 1 Foundation Concepts....... 5", "size": 11, "bold": False},
+        {"page": 2, "text": "Chapter 2 Advanced Networking....... 18", "size": 11, "bold": False},
+        {"page": 5, "text": "Chapter 1 Foundation Concepts", "size": 18, "bold": True},
+        {"page": 5, "text": "Detailed discussion of core fundamentals.", "size": 11, "bold": False},
+        {"page": 18, "text": "Chapter 2 Advanced Networking", "size": 18, "bold": True},
+        {"page": 18, "text": "Packet flow and service mesh architecture.", "size": 11, "bold": False},
+    ]
+    heads_l2 = detect_headings(lines_l2, toc=None, n_pages=25)
+    assert len(heads_l2) >= 2
+    assert any(h["method"] in ("toc_pages", "body_headings") for h in heads_l2)
+
+    # Layer 3: No TOC, only body headings
+    lines_l3 = [
+        {"page": 5, "text": "Chapter 1 System Architecture", "size": 16, "bold": True},
+        {"page": 5, "text": "System components and buses.", "size": 11, "bold": False},
+        {"page": 20, "text": "Chapter 2 Storage Engines", "size": 16, "bold": True},
+        {"page": 20, "text": "Block and file storage drivers.", "size": 11, "bold": False},
+    ]
+    heads_l3 = detect_headings(lines_l3, toc=None, n_pages=30)
+    assert len(heads_l3) == 2
+    assert heads_l3[0]["method"] == "body_headings"
+    assert heads_l3[0]["confidence"] == 0.70
+
+    # Layer 3 Part N refinement: when only Part N is found, fine-grained subheadings are chosen
+    lines_parts = [
+        {"page": 5, "text": "Part 1 Fundamentals", "size": 20, "bold": True},
+        {"page": 6, "text": "1.1 Memory Systems and Caching", "size": 14, "bold": True},
+        {"page": 15, "text": "1.2 Pipeline Hazards and Branching", "size": 14, "bold": True},
+        {"page": 25, "text": "Part 2 Advanced Topics", "size": 20, "bold": True},
+        {"page": 26, "text": "2.1 Multithreading and Coherence", "size": 14, "bold": True},
+    ]
+    heads_parts = detect_headings(lines_parts, toc=None, n_pages=40)
+    assert len(heads_parts) >= 2
+    # Ensure finer numbered sections were preferred over coarse Part headings
+    assert any("1.1" in h["title"] or "1.2" in h["title"] for h in heads_parts)
+
+    # Layer 4: Fallback pseudo-sections (no headings found)
+    lines_l4 = [
+        {"page": p, "text": f"Page content paragraph describing uninterrupted system behavior on page {p}.", "size": 11, "bold": False}
+        for p in range(1, 41)
+    ]
+    heads_l4 = detect_headings(lines_l4, toc=None, n_pages=40)
+    assert len(heads_l4) >= 2
+    assert all(h["title"].startswith("Pages ") for h in heads_l4)
+    assert heads_l4[0]["method"] == "semantic_page_windows"
+
+
+def test_change1_scheme_tolerant_parsing():
+    """Change 1: Scheme unit parsing tolerates UNIT-I, Module 2, table formats, and varied hours."""
+    from scheme import parse_scheme_text
+
+    raw_scheme = """
+    Syllabus Overview
+
+    UNIT-I: Distributed Storage (8 Hrs)
+    Distributed hash tables, Paxos consensus, Raft protocol, replication factor.
+
+    Module 2: Cloud Orchestration [8 hours]
+    Container runtimes - Pod lifecycle - Service mesh - Ingress routing.
+
+    | Unit 3 | Observability & Telemetry | (8) |
+    Metrics collection, Prometheus scraping, OpenTelemetry tracing, distributed logs.
+
+    UNIT - IV
+    Security & Policy Engines
+    Role-based access control, mutual TLS, secrets management, network policies.
+
+    Course Outcomes:
+    CO1: Understand distributed storage and consensus protocols.
+    CO2: Apply container orchestration principles.
+    CO3: Evaluate observability and tracing pipelines.
+    CO4: Formulate security and access policies.
+
+    Text Books:
+    1. Distributed Systems Principles, Tanenbaum
+    2. Kubernetes in Action, Marko Luksa
+    """
+    res = parse_scheme_text(raw_scheme)
+    units = res["units"]
+    assert len(units) >= 4
+
+    u1 = next(u for u in units if u["unit"] == 1)
+    assert "Distributed Storage" in u1["title"]
+    assert u1["hours"] == 8
+    assert any("Paxos consensus" in t for t in u1["topics"])
+
+    u2 = next(u for u in units if u["unit"] == 2)
+    assert "Cloud Orchestration" in u2["title"]
+    assert u2["hours"] == 8
+    assert any("Pod lifecycle" in t for t in u2["topics"])
+
+    u3 = next(u for u in units if u["unit"] == 3)
+    assert "Observability" in u3["title"]
+    assert u3["hours"] == 8
+
+    u4 = next(u for u in units if u["unit"] == 4)
+    assert "Security" in u4["title"]
+    assert len(u4["topics"]) >= 2
+
+    # Verify pasted COs preserved exactly
+    cos = res["outcomes"]
+    assert cos["CO1"] == "Understand distributed storage and consensus protocols."
+    assert cos["CO2"] == "Apply container orchestration principles."
+
+
+def test_change1_mapping_confidence_and_unmapped_units():
+    """Change 1: Units with no match stay unmapped, low confidence is flagged, manual mapping overrides."""
+    from scheme import prefill_unit_sources
+
+    library = {
+        "books": {
+            "book1": {
+                "title": "Docker in Practice",
+                "chapters": ["Chapter 1 Containers", "Chapter 2 Networking"],
+            }
+        },
+        "chunks": [
+            {"book_id": "book1", "chapter": "Chapter 1 Containers", "text": "Docker container lifecycle and execution."},
+            {"book_id": "book1", "chapter": "Chapter 2 Networking", "text": "Docker bridge networks and port forwarding."},
+        ],
+    }
+
+    scheme = {
+        "units": [
+            # High relevance match -> auto
+            {"unit": 1, "title": "Docker Containers", "topics": ["container lifecycle", "docker run"]},
+            # Low / zero match -> must stay UNMAPPED (no forced fallback)
+            {"unit": 2, "title": "Quantum Cryptography and Post-Quantum Algorithms", "topics": ["lattice cryptography", "shor algorithm"]},
+        ],
+        "unit_sources": {},
+    }
+
+    filled = prefill_unit_sources(scheme, library, min_confidence=0.45, suggest_confidence=0.25)
+    meta = scheme.get("unit_mapping_meta", {})
+
+    # Unit 1 is auto-mapped
+    assert 1 in filled and filled[1] is not None
+    assert "Chapter 1 Containers" in filled[1]["book1"]
+    assert meta[1]["status"] in ("auto", "suggested")
+
+    # Unit 2 has no matching content -> remains UNMAPPED
+    assert filled.get(2) is None
+    assert meta[2]["status"] == "unmapped"
+    assert "could not be mapped confidently" in meta[2]["warning"].lower()
+
+    # Manual mapping override persists
+    manual_sources = {
+        1: {"book1": ["Chapter 1 Containers"]},
+        2: {"book1": ["Chapter 2 Networking"]},  # user manually mapped unit 2
+    }
+    scheme["unit_sources"] = manual_sources
+    filled_manual = prefill_unit_sources(scheme, library, min_confidence=0.45, suggest_confidence=0.25)
+    assert filled_manual[2] == {"book1": ["Chapter 2 Networking"]}
+
+
+def test_change2_50_marks_paper_no_choice_ui_model():
+    """Change 2: 50-mark paper has has_choice=False, format_paper has no OR, and 100-mark has choice."""
+    from paper_preset import PRESETS, format_paper
+
+    p50 = PRESETS["50 Marks (Standard)"]
+    assert p50.has_choice is False
+
+    p100 = PRESETS["100 Marks (Choice)"]
+    assert p100.has_choice is True
+
+    # 50-mark paper questions (no internal choice)
+    q_50 = [
+        {"unit": 1, "question_no": 1, "id": "1(a)", "question": "Define memory hierarchy.", "marks": 5, "co": "CO1", "level": "L1"},
+        {"unit": 1, "question_no": 1, "id": "1(b)", "question": "Explain virtual memory.", "marks": 5, "co": "CO1", "level": "L2"},
+        {"unit": 2, "question_no": 2, "id": "2(a)", "question": "Compare RISC and CISC.", "marks": 5, "co": "CO2", "level": "L2"},
+        {"unit": 2, "question_no": 2, "id": "2(b)", "question": "Describe pipeline hazards.", "marks": 5, "co": "CO2", "level": "L3"},
+    ]
+    paper_50_text = format_paper(q_50, has_choice=p50.has_choice)
+    assert "OR" not in paper_50_text
+    assert "UNIT 1" in paper_50_text
+    assert "Q1.  (a) Define memory hierarchy.  [5 marks]  CO1  L1" in paper_50_text
+
+    # 100-mark paper questions (with internal choice OR)
+    q_100 = [
+        {"unit": 1, "question_no": 1, "id": "1(a)", "question": "Explain memory hierarchy.", "marks": 10, "co": "CO1", "level": "L2", "alternative_group": "u1_choice"},
+        {"unit": 1, "question_no": 2, "id": "2(a)", "question": "Describe cache mapping.", "marks": 10, "co": "CO2", "level": "L2", "alternative_group": "u1_choice"},
+    ]
+    paper_100_text = format_paper(q_100, has_choice=p100.has_choice)
+    assert "OR" in paper_100_text
+
 
 

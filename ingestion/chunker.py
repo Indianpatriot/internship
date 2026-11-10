@@ -40,6 +40,8 @@ def _split_units(units, max_words, overlap_words, min_words):
             groups[-1].extend(cur[-n_new:])       # merge tiny tail
         elif sum(_wc(u) for u in cur) >= min_words:
             groups.append(cur)
+        elif not groups and cur:
+            groups.append(cur)
     return groups
 
 
@@ -57,18 +59,23 @@ def build_chunks(lines, headings, max_words=MAX_CHUNK_WORDS,
     starts = {h["line_idx"]: h for h in clean_headings}
     skip = set()
     for h in clean_headings:
-        skip.update(range(h["line_idx"], h["last_idx"] + 1))
+        if h.get("method") != "semantic_page_windows":
+            skip.update(range(h["line_idx"], h["last_idx"] + 1))
 
-    # Identify real level-1 chapter boundaries with start pages
+    # Identify chapter boundaries with start pages (using top-level headings)
+    min_lvl = min((h.get("level", 1) for h in clean_headings), default=1)
     chap_starts = []
     seen_chap_pages = set()
     for h in clean_headings:
-        if h.get("level") == 1:
+        if h.get("level") == min_lvl:
             p = h.get("page", 1)
             if p not in seen_chap_pages:
                 seen_chap_pages.add(p)
                 chap_starts.append({"title": h["title"], "page": p, "line_idx": h["line_idx"]})
     chap_starts.sort(key=lambda x: (x["page"], x["line_idx"]))
+
+    det_method = clean_headings[0].get("method", "body_headings") if clean_headings else "page_range"
+    det_conf = clean_headings[0].get("confidence", 0.70) if clean_headings else 0.30
 
     raw_chunks, buf = [], []
     cur_section = ""
@@ -93,6 +100,8 @@ def build_chunks(lines, headings, max_words=MAX_CHUNK_WORDS,
                 "page_end": p_end,
                 "text": text,
                 "word_count": len(text.split()),
+                "detection_method": det_method,
+                "detection_confidence": det_conf,
             })
         buf.clear()
 
