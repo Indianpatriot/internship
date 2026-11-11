@@ -180,6 +180,10 @@ class MockClient:
         elif self.fail_mode == "bloom_verb_fail" and not ("Model Answer:" in prompt or "authoritative model answer" in prompt):
             return "Predict the cosmological future evolution of quantum entanglement?"
 
+        # Marking scheme prompt
+        if "MARKING SCHEME" in prompt or ("marking scheme" in prompt.lower() and "criteria" in prompt.lower()):
+            return self._generate_marking_scheme(prompt)
+
         # Unit-to-chapter mapping prompt
         if "map each unmapped syllabus unit" in prompt.lower() or "available textbook chapters" in prompt.lower():
             return self._generate_unit_mapping(prompt)
@@ -359,3 +363,295 @@ class MockClient:
                 }
 
         return json.dumps(mappings, indent=2)
+
+    def _generate_marking_scheme(self, prompt: str) -> str:
+        """Mock valid JSON response for marking scheme generation."""
+        import json
+
+        q_match = re.search(r"Question:\s*(.*?)(?:\n\s*Bloom's Level:|\n\s*Total Marks:|$)", prompt, re.S)
+        question = q_match.group(1).strip() if q_match else ""
+
+        lvl_match = re.search(r"Bloom's Level:\s*(L[1-6])", prompt, re.I) or re.search(r"\b(L[1-6])\b", prompt)
+        level = lvl_match.group(1).upper() if lvl_match else "L2"
+        if not level.startswith("L"):
+            level = f"L{level}"
+
+        m_match = re.search(r"Total Marks:\s*(\d+)", prompt, re.I) or re.search(r"sum EXACTLY to (\d+)", prompt, re.I)
+        marks = int(m_match.group(1)) if m_match else 5
+
+        # Check diagram demand: include diagram criterion ONLY if question contains draw/diagram
+        has_diagram = bool(
+            re.search(r"\b(draw|diagram|flowchart|illustrate|schematic|sketch)\b", question, re.I)
+        )
+
+        diag_m = 0
+        if has_diagram and marks >= 4:
+            diag_m = max(2, min(int(round(0.25 * marks)), 4))
+        rem_m = marks - diag_m
+
+        criteria_specs: list[dict[str, Any]] = []
+
+        if level == "L1":
+            if rem_m <= 2:
+                criteria_specs.append({
+                    "criterion": "Definition and core terminology",
+                    "kind": "definition",
+                    "marks": rem_m,
+                    "reason": "Direct recall of definition and core terminology required for L1.",
+                    "expected": "Accurate formal definition and technical terms.",
+                    "partial_credit": None,
+                    "alternatives": ["Accept standard textbook definition or equivalent terminology."],
+                })
+            else:
+                def_m = 2 if rem_m >= 5 else 1
+                pts_m = rem_m - def_m
+                criteria_specs.append({
+                    "criterion": "Definition and terminology",
+                    "kind": "definition",
+                    "marks": def_m,
+                    "reason": "Foundational recall of definition; accurate terminology required.",
+                    "expected": "Formal definition of technical concept and primary scope.",
+                    "partial_credit": "1 mark for partial definition.",
+                    "alternatives": [],
+                })
+                criteria_specs.append({
+                    "criterion": "Enumerated key facts and properties",
+                    "kind": "points",
+                    "marks": pts_m,
+                    "reason": f"{pts_m} distinct checkable facts or properties, 1 mark each.",
+                    "expected": f"List of {pts_m} specific technical properties or core components.",
+                    "partial_credit": "1 mark per distinct checkable fact correctly listed.",
+                    "alternatives": ["Accept valid alternative properties described in textbook."],
+                })
+
+        elif level == "L2":
+            if rem_m <= 3:
+                criteria_specs.append({
+                    "criterion": "Conceptual explanation",
+                    "kind": "explanation",
+                    "marks": rem_m,
+                    "reason": "Demonstrates clear conceptual understanding and system behavior.",
+                    "expected": "Clear explanation of system principles and operational behavior.",
+                    "partial_credit": "1 mark for basic understanding without complete explanation.",
+                    "alternatives": ["Accept alternative operational phrasing or equivalent explanation."],
+                })
+            elif rem_m <= 5:
+                criteria_specs.append({
+                    "criterion": "Concept definition and overview",
+                    "kind": "definition",
+                    "marks": 2,
+                    "reason": "L2 questions start with accurate conceptual definition.",
+                    "expected": "Clear definition of core architecture and primary function.",
+                    "partial_credit": "1 mark for partial definition.",
+                    "alternatives": [],
+                })
+                criteria_specs.append({
+                    "criterion": "Mechanism and operational role",
+                    "kind": "explanation",
+                    "marks": rem_m - 2,
+                    "reason": "Technical explanation of system behavior and components.",
+                    "expected": "Detailed explanation of component interactions and runtime behavior.",
+                    "partial_credit": "1 mark per key operational aspect explained.",
+                    "alternatives": ["Alternative functional description using system APIs."],
+                })
+            else:
+                def_m = 2
+                ex_m = max(2, rem_m - 4)
+                app_m = rem_m - def_m - ex_m
+                criteria_specs.append({
+                    "criterion": "Definition and architectural overview",
+                    "kind": "definition",
+                    "marks": def_m,
+                    "reason": "Foundational conceptual recall and definition.",
+                    "expected": "Accurate formal definition of core architecture and purpose.",
+                    "partial_credit": "1 mark for partial definition.",
+                    "alternatives": [],
+                })
+                criteria_specs.append({
+                    "criterion": "Detailed explanation of components and mechanisms",
+                    "kind": "explanation",
+                    "marks": ex_m,
+                    "reason": "Comprehensive operational breakdown of internal mechanism.",
+                    "expected": "Identifies key components and explains runtime execution flow.",
+                    "partial_credit": "1-2 marks for partial explanation.",
+                    "alternatives": ["Alternative component model with equivalent functional responsibilities."],
+                })
+                criteria_specs.append({
+                    "criterion": "Practical example or application context",
+                    "kind": "example",
+                    "marks": app_m,
+                    "reason": "Demonstrates practical comprehension in realistic system scenario.",
+                    "expected": "Concrete practical example or realistic deployment scenario.",
+                    "partial_credit": "1 mark for partial example.",
+                    "alternatives": [],
+                })
+
+        elif level == "L3":
+            if rem_m <= 3:
+                criteria_specs.append({
+                    "criterion": "Application procedure and execution",
+                    "kind": "steps",
+                    "marks": rem_m,
+                    "reason": "Accurate application of procedure to solve the given problem.",
+                    "expected": "Correct sequence of operational steps and technical commands.",
+                    "partial_credit": "1 mark per correct step.",
+                    "alternatives": ["Alternative valid execution commands."],
+                })
+            else:
+                step_m = max(2, int(round(0.6 * rem_m)))
+                res_m = rem_m - step_m
+                criteria_specs.append({
+                    "criterion": "Procedural steps and commands",
+                    "kind": "steps",
+                    "marks": step_m,
+                    "reason": "Correct step-by-step technical methodology and execution commands.",
+                    "expected": "Correct sequence of configuration steps and execution commands.",
+                    "partial_credit": "1 mark per correct command or procedural step.",
+                    "alternatives": ["Alternative command flags or script implementation."],
+                })
+                criteria_specs.append({
+                    "criterion": "Verification and expected result",
+                    "kind": "explanation",
+                    "marks": res_m,
+                    "reason": "Validation of applied result and operational verification.",
+                    "expected": "Expected console output, verification check, or system state change.",
+                    "partial_credit": "1 mark for partial verification.",
+                    "alternatives": [],
+                })
+
+        elif level == "L4":
+            p1 = max(1, rem_m // 2)
+            p2 = rem_m - p1
+            criteria_specs.append({
+                "criterion": "Component and architectural analysis",
+                "kind": "analysis",
+                "marks": p1,
+                "reason": "Analytical decomposition of distinct architectural elements.",
+                "expected": "In-depth decomposition of component roles and subsystem boundaries.",
+                "partial_credit": "1 mark per analyzed component.",
+                "alternatives": [],
+            })
+            criteria_specs.append({
+                "criterion": "Comparative distinction and interaction trade-offs",
+                "kind": "comparison",
+                "marks": p2,
+                "reason": "Examination of relational trade-offs and structural differences.",
+                "expected": "Contrasting trade-offs, performance implications, and limitations.",
+                "partial_credit": "1 mark per substantiated comparison point.",
+                "alternatives": ["Alternative comparative evaluation metrics."],
+            })
+
+        else:
+            # L5 or L6
+            if rem_m <= 4:
+                p1 = max(1, rem_m // 2)
+                p2 = rem_m - p1
+                criteria_specs.append({
+                    "criterion": "Evaluation criteria and benchmarks",
+                    "kind": "justification",
+                    "marks": p1,
+                    "reason": "Technical benchmarks and design standards grounded in context.",
+                    "expected": "Defines quantitative or qualitative technical benchmarks.",
+                    "partial_credit": "1 mark for basic criteria identification.",
+                    "alternatives": [],
+                })
+                criteria_specs.append({
+                    "criterion": "Trade-off analysis and final verdict",
+                    "kind": "conclusion",
+                    "marks": p2,
+                    "reason": "Evidence-based technical justification and final recommendation.",
+                    "expected": "Definitive technical verdict supported by contextual evidence.",
+                    "partial_credit": "1 mark for partial justification.",
+                    "alternatives": ["Alternative justified recommendation based on different constraints."],
+                })
+            else:
+                p1 = max(1, int(round(0.4 * rem_m)))
+                p2 = max(1, int(round(0.4 * rem_m)))
+                p3 = rem_m - p1 - p2
+                if p3 <= 0:
+                    p1 = max(1, rem_m // 2)
+                    p2 = rem_m - p1
+                    criteria_specs.append({
+                        "criterion": "Evaluation standards and technical criteria",
+                        "kind": "justification",
+                        "marks": p1,
+                        "reason": "Technical benchmarks and evaluation criteria.",
+                        "expected": "Defines concrete evaluation metrics and design goals.",
+                        "partial_credit": "1 mark per criterion.",
+                        "alternatives": [],
+                    })
+                    criteria_specs.append({
+                        "criterion": "Technical justification and verdict",
+                        "kind": "conclusion",
+                        "marks": p2,
+                        "reason": "Evidence-based justification and final conclusion.",
+                        "expected": "Synthesized evaluative verdict with supporting evidence.",
+                        "partial_credit": "1 mark for partial verdict.",
+                        "alternatives": ["Alternative justified verdict with trade-off analysis."],
+                    })
+                else:
+                    criteria_specs.append({
+                        "criterion": "Architectural / evaluation criteria",
+                        "kind": "justification",
+                        "marks": p1,
+                        "reason": "Technical benchmarks and evaluation criteria.",
+                        "expected": "Defines architectural standards and operational requirements.",
+                        "partial_credit": "1 mark per criterion.",
+                        "alternatives": [],
+                    })
+                    criteria_specs.append({
+                        "criterion": "System trade-offs and technical justification",
+                        "kind": "analysis",
+                        "marks": p2,
+                        "reason": "Detailed trade-off analysis and system boundary constraints.",
+                        "expected": "In-depth trade-off analysis addressing latency, memory, or complexity.",
+                        "partial_credit": "1 mark per trade-off analyzed.",
+                        "alternatives": ["Alternative trade-off analysis focusing on scalability."],
+                    })
+                    criteria_specs.append({
+                        "criterion": "Synthesized conclusion / design recommendation",
+                        "kind": "conclusion",
+                        "marks": p3,
+                        "reason": "Definitive technical recommendation or synthesized conclusion.",
+                        "expected": "Synthesized actionable design recommendation or verdict.",
+                        "partial_credit": "1 mark for partial conclusion.",
+                        "alternatives": [],
+                    })
+
+        # Append diagram criterion if question requires drawing
+        if diag_m > 0:
+            struct_m = max(1, diag_m // 2)
+            label_m = diag_m - struct_m
+            criteria_specs.append({
+                "criterion": "Architecture diagram and labelling",
+                "kind": "diagram",
+                "marks": diag_m,
+                "reason": (
+                    f"Diagram is required by the question and rewards correct structure/layout ({struct_m}M) "
+                    f"and labelling accuracy ({label_m}M)."
+                ),
+                "expected": "Diagram with labelled components and arrows showing the flow.",
+                "partial_credit": f"{struct_m} mark for correct layout without complete labels.",
+                "alternatives": [],
+            })
+
+        criteria_list = []
+        for i, spec in enumerate(criteria_specs, 1):
+            criteria_list.append({
+                "no": i,
+                "criterion": spec["criterion"],
+                "expected": spec["expected"],
+                "marks": spec["marks"],
+                "kind": spec["kind"],
+                "reason": spec["reason"],
+                "partial_credit": spec.get("partial_credit"),
+                "alternatives": spec.get("alternatives", []),
+            })
+
+        scheme_data = {
+            "total_marks": marks,
+            "criteria": criteria_list,
+            "notes": "Examiner guidance: evaluate technical accuracy and key terminology.",
+        }
+        return json.dumps(scheme_data, indent=2)
+

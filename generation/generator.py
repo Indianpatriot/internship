@@ -45,6 +45,7 @@ from config import (
 )
 from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_answer_prompt, build_prompt
+from generation.scheme_generator import build_fallback_scheme, generate_scheme
 from retrieval.sources import is_content_chunk, select_chunks_for_unit
 
 DANGLING_ENDINGS = {
@@ -1771,6 +1772,12 @@ def generate_paper_by_slots(
                     "display_label": "",
                     "chapter": "",
                     "page": "",
+                    "marking_scheme": build_fallback_scheme(
+                        question=f"Placeholder for Unit {slot.get('unit')}",
+                        level=slot.get("level", "L2"),
+                        marks=slot.get("marks", 5),
+                        answer=specific_reason,
+                    ),
                 }
                 placeholder_questions.append(placeholder_q)
                 slot_copy = dict(slot)
@@ -1895,6 +1902,12 @@ def generate_paper_by_slots(
                     "display_label": "",
                     "chapter": "",
                     "page": "",
+                    "marking_scheme": build_fallback_scheme(
+                        question=f"Placeholder for Unit {slot.get('unit')}",
+                        level=slot.get("level", "L2"),
+                        marks=slot.get("marks", 5),
+                        answer=specific_reason,
+                    ),
                 }
                 slot_copy = dict(slot)
                 slot_copy["reason_code"] = reason_code
@@ -2044,6 +2057,24 @@ def generate_paper_by_slots(
             rec["review_flags"] = []
             rec["needs_review"] = False
 
+            # Generate examiner marking scheme
+            try:
+                rec["marking_scheme"] = generate_scheme(
+                    question_record=rec,
+                    chunk=chunk,
+                    client=client,
+                    rng=slot_rng,
+                    force_regenerate=force_regenerate,
+                )
+            except Exception as sch_ex:
+                rec["marking_scheme"] = build_fallback_scheme(
+                    question=rec.get("question", ""),
+                    level=slot.get("level", "L2"),
+                    marks=slot.get("marks", 5),
+                    answer=rec.get("answer", ""),
+                    chunk_text=chunk.get("text", ""),
+                )
+
             if ans_rec.get("ungrounded_sentences"):
                 rec["ungrounded_sentences"] = ans_rec["ungrounded_sentences"]
                 rec["needs_review"] = True
@@ -2116,6 +2147,24 @@ def generate_paper_by_slots(
                         rec["kd"] = slot_kd
                         rec["review_flags"] = []
                         rec["needs_review"] = False
+
+                        # Generate examiner marking scheme
+                        try:
+                            rec["marking_scheme"] = generate_scheme(
+                                question_record=rec,
+                                chunk=fresh_chunk,
+                                client=client,
+                                rng=slot_rng,
+                                force_regenerate=force_regenerate,
+                            )
+                        except Exception as sch_ex:
+                            rec["marking_scheme"] = build_fallback_scheme(
+                                question=rec.get("question", ""),
+                                level=slot.get("level", "L2"),
+                                marks=slot.get("marks", 5),
+                                answer=rec.get("answer", ""),
+                                chunk_text=fresh_chunk.get("text", ""),
+                            )
                         with group_lock:
                             if alt_group and fresh_chunk.get("page_start"):
                                 used_pages_per_unit_group.setdefault((slot_unit, alt_group), set()).add(fresh_chunk["page_start"])
