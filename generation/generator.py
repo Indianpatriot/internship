@@ -1533,7 +1533,13 @@ def normalize_paper_question_numbers(questions: list[dict[str, Any]]) -> list[di
             q["question_no"] = new_qno
             sub = q.get("sub_index")
             if sub:
-                letter = chr(96 + int(sub))
+                if isinstance(sub, str) and sub.isalpha():
+                    letter = sub.lower()
+                else:
+                    try:
+                        letter = chr(96 + int(sub))
+                    except (ValueError, TypeError):
+                        letter = str(sub)
                 q["id"] = f"{new_qno}({letter})"
             else:
                 q["id"] = f"{new_qno}"
@@ -1555,7 +1561,13 @@ def normalize_paper_question_numbers(questions: list[dict[str, Any]]) -> list[di
                 q["question_no"] = curr_q_no
                 sub = q.get("sub_index") or (s_idx if has_subs else None)
                 if sub:
-                    letter = chr(96 + int(sub))
+                    if isinstance(sub, str) and sub.isalpha():
+                        letter = sub.lower()
+                    else:
+                        try:
+                            letter = chr(96 + int(sub))
+                        except (ValueError, TypeError):
+                            letter = str(sub)
                     q["id"] = f"{curr_q_no}({letter})"
                 else:
                     q["id"] = f"{curr_q_no}"
@@ -1865,8 +1877,26 @@ def generate_paper_by_slots(
 
         # Deterministic slot chunk partitioning (Problem 2.2)
         # Disjoint chunk start for OR alternatives (Option A vs Option B) and sub-questions
-        sub_i = slot.get("sub_index", 1) or 1
-        q_no = slot.get("question_no", 1) or 1
+        sub_raw = slot.get("sub_index", 1) or 1
+        if isinstance(sub_raw, str):
+            if sub_raw.isalpha():
+                sub_i = ord(sub_raw.lower()[0]) - ord("a") + 1
+            else:
+                try:
+                    sub_i = int(sub_raw)
+                except (ValueError, TypeError):
+                    sub_i = 1
+        else:
+            try:
+                sub_i = int(sub_raw)
+            except (ValueError, TypeError):
+                sub_i = 1
+
+        q_raw = slot.get("question_no", 1) or 1
+        try:
+            q_no = int(q_raw)
+        except (ValueError, TypeError):
+            q_no = 1
         slot_offset = ((q_no - 1) * 3 + (sub_i - 1)) if (q_no and sub_i) else slot_idx
 
         slot_co = slot.get("co")
@@ -2244,7 +2274,7 @@ def generate_paper_by_slots(
                     reason_code, specific_reason, hint = classify_exception_to_reason_code(ex)
                     slot_i = slots[idx]
                     slot_id = slot_i.get("id") or slot_i.get("label") or f"Q{idx + 1:03d}"
-                    log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, error=str(ex))
+                    log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, exception_msg=str(ex))
                     slot_kd = normalize_knowledge_dimension(
                         slot_i.get("knowledge_dimension") or slot_i.get("kd")
                     )
@@ -2275,6 +2305,12 @@ def generate_paper_by_slots(
                         "display_label": "",
                         "chapter": "",
                         "page": "",
+                        "marking_scheme": build_fallback_scheme(
+                            question=f"Placeholder for Unit {slot_i.get('unit')}",
+                            level=slot_i.get("level", "L2"),
+                            marks=slot_i.get("marks", 5),
+                            answer=specific_reason,
+                        ),
                     }
                     slot_copy = dict(slot_i)
                     slot_copy["reason_code"] = reason_code

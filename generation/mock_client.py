@@ -180,8 +180,8 @@ class MockClient:
         elif self.fail_mode == "bloom_verb_fail" and not ("Model Answer:" in prompt or "authoritative model answer" in prompt):
             return "Predict the cosmological future evolution of quantum entanglement?"
 
-        # Marking scheme prompt
-        if "MARKING SCHEME" in prompt or ("marking scheme" in prompt.lower() and "criteria" in prompt.lower()):
+        # Marking scheme prompt (strict JSON format)
+        if "MARKING SCHEME in strict JSON format" in prompt or "Now generate the marking scheme JSON for:" in prompt:
             return self._generate_marking_scheme(prompt)
 
         # Unit-to-chapter mapping prompt

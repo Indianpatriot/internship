@@ -12,6 +12,7 @@ from typing import Any, Optional, Union
 
 from blooms.verb_bank import normalize_level
 from contracts import MarkingScheme, SchemeCriterion, VALID_CRITERION_KINDS, validate_marking_scheme
+from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_scheme_prompt
 
 logger = logging.getLogger(__name__)
@@ -496,6 +497,24 @@ def generate_scheme(
         context=chunk_text,
     )
 
+    model_name = getattr(client, "model", "default")
+    cached_resp = get_cached_response(
+        prompt=prompt,
+        model=model_name,
+        temperature=0.2,
+        force_regenerate=force_regenerate,
+    )
+    if cached_resp:
+        parsed = extract_json_object(cached_resp)
+        if parsed and isinstance(parsed, dict) and "criteria" in parsed:
+            ok, _ = validate_marking_scheme(parsed, m)
+            if ok:
+                parsed["is_fallback"] = False
+                return parsed  # type: ignore
+            if repair_scheme_marks(parsed, m):
+                parsed["is_fallback"] = False
+                return parsed  # type: ignore
+
     for attempt in range(max_retries):
         try:
             raw_response = client.generate(
@@ -505,6 +524,12 @@ def generate_scheme(
             )
             parsed = extract_json_object(raw_response)
             if parsed and isinstance(parsed, dict) and "criteria" in parsed:
+                store_cached_response(
+                    prompt=prompt,
+                    model=model_name,
+                    response=raw_response,
+                    temperature=0.2,
+                )
                 # First attempt direct validation
                 ok, problems = validate_marking_scheme(parsed, m)
                 if ok:
