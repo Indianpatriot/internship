@@ -161,6 +161,9 @@ def get_cached_docx_paper(
     profile="faculty",
     exam_type="SEE",
     semester="",
+    include_qa_flags=None,
+    include_marking_scheme=True,
+    include_reasons=True,
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_docx_exam_paper(
@@ -174,10 +177,13 @@ def get_cached_docx_paper(
         include_knowledge_dim=True,
         include_answers=include_answers,
         include_totals=include_totals,
+        include_marking_scheme=include_marking_scheme,
+        include_reasons=include_reasons,
         totals_summary=totals_summary_data,
         profile=profile,
         exam_type=exam_type,
         semester=semester,
+        include_qa_flags=include_qa_flags,
     )
 
 
@@ -195,6 +201,9 @@ def get_cached_pdf_paper(
     profile="faculty",
     exam_type="SEE",
     semester="",
+    include_qa_flags=None,
+    include_marking_scheme=True,
+    include_reasons=True,
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_pdf_exam_paper(
@@ -208,10 +217,13 @@ def get_cached_pdf_paper(
         include_knowledge_dim=True,
         include_answers=include_answers,
         include_totals=include_totals,
+        include_marking_scheme=include_marking_scheme,
+        include_reasons=include_reasons,
         totals_summary=totals_summary_data,
         profile=profile,
         exam_type=exam_type,
         semester=semester,
+        include_qa_flags=include_qa_flags,
     )
 
 
@@ -1615,6 +1627,56 @@ if st.session_state.results:
             paper_hdr = "##### 📝 Exam Paper Layout (Internal Choice OR Format)" if paper_has_choice else "##### 📝 Exam Paper Layout"
             st.markdown(paper_hdr)
             st.code(format_paper(questions, has_choice=paper_has_choice), language="markdown")
+
+            st.write("---")
+            st.markdown("##### 📋 Question Details, Marking Schemes & Model Answers")
+            for q in questions:
+                q_id = q.get("id", "")
+                q_txt = q.get("question", "")
+                q_marks = q.get("marks", "")
+                q_lvl = q.get("level", "")
+                q_co = q.get("co", "")
+                st.markdown(f"**Question {q_id}** [{q_marks} Marks] *({q_lvl}, {q_co})*: {q_txt}")
+
+                scheme = q.get("marking_scheme")
+                is_fb = scheme.get("is_fallback") if isinstance(scheme, dict) else False
+                badge = " *(auto-generated structure; review before use)*" if is_fb else ""
+
+                with st.expander(f"📋 Marking scheme: Question {q_id}{badge}", expanded=False):
+                    if scheme and isinstance(scheme, dict) and scheme.get("criteria"):
+                        rows = []
+                        for c in scheme["criteria"]:
+                            exp_text = str(c.get("expected", ""))
+                            alts = c.get("alternatives")
+                            if alts and isinstance(alts, list) and len(alts) > 0:
+                                exp_text += "\n\n*OR (Acceptable Alternatives):*\n" + "\n".join(f"- {a}" for a in alts)
+                            rows.append({
+                                "No": c.get("no", ""),
+                                "Criterion": c.get("criterion", ""),
+                                "What the examiner looks for": exp_text,
+                                "Marks": c.get("marks", ""),
+                                "Reason": c.get("reason", ""),
+                            })
+                        tot = scheme.get("total_marks", sum(r["Marks"] for r in rows if isinstance(r["Marks"], (int, float))))
+                        rows.append({
+                            "No": "",
+                            "Criterion": "**Total**",
+                            "What the examiner looks for": "",
+                            "Marks": f"**{tot}**",
+                            "Reason": "",
+                        })
+                        df_scheme = pd.DataFrame(rows)
+                        st.dataframe(df_scheme, hide_index=True, use_container_width=True)
+                        if scheme.get("notes"):
+                            st.caption(f"**Examiner Notes:** {scheme['notes']}")
+                        if is_fb:
+                            st.caption("⚠️ * This marking scheme was auto-generated from rule-based templates. Please review before use.")
+                    else:
+                        st.info("Marking scheme not available.")
+
+                with st.expander(f"💡 Model answer: Question {q_id}", expanded=False):
+                    ans = q.get("answer", "Model answer pending evaluation.")
+                    st.markdown(ans)
         with tab_tbl:
             st.dataframe(
                 df,
@@ -1650,6 +1712,11 @@ if st.session_state.results:
                 value=True,
                 help="Append cumulative Course Outcome (CO) and Bloom's Taxonomy (BT) distribution tables to DOCX, PDF, and UI summary.",
             )
+            include_marking_scheme = st.checkbox(
+                "Include marking scheme in export",
+                value=True,
+                help="Include examiner marking scheme criteria breakdown tables in DOCX and PDF papers.",
+            )
         with col_opt2:
             ans_help = (
                 "Include verified model answers (with OR alternative format) in DOCX and PDF papers."
@@ -1657,9 +1724,14 @@ if st.session_state.results:
                 "Include verified model answers in DOCX and PDF papers."
             )
             include_answers = st.checkbox(
-                "Include Model Answers & Scheme of Evaluation",
+                "Include Model Answers in export",
                 value=True,
                 help=ans_help,
+            )
+            include_reasons = st.checkbox(
+                "Include reasons",
+                value=True,
+                help="Include pedagogical justification / examiner reasoning column in the marking scheme table.",
             )
 
         # Calculate totals summary if requested
@@ -1739,8 +1811,10 @@ if st.session_state.results:
             outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
             covered_chaps_tuple=chaps_tuple,
-            include_answers=True,
+            include_answers=include_answers,
             include_totals=True,
+            include_marking_scheme=include_marking_scheme,
+            include_reasons=include_reasons,
             totals_summary_data=totals_summary,
             profile="faculty",
             include_qa_flags=True,
@@ -1752,8 +1826,10 @@ if st.session_state.results:
             outcomes_tuple=outcomes_tuple,
             institution_name=st.session_state.institution_name,
             covered_chaps_tuple=chaps_tuple,
-            include_answers=True,
+            include_answers=include_answers,
             include_totals=True,
+            include_marking_scheme=include_marking_scheme,
+            include_reasons=include_reasons,
             totals_summary_data=totals_summary,
             profile="faculty",
             include_qa_flags=True,

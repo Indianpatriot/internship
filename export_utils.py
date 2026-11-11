@@ -375,6 +375,8 @@ def create_docx_exam_paper(
     include_knowledge_dim: bool = True,
     include_answers: bool = True,
     include_totals: bool = True,
+    include_marking_scheme: bool = True,
+    include_reasons: bool = True,
     totals_summary: Optional[dict[str, Any]] = None,
     profile: str = "faculty",
     exam_type: str = "SEE",
@@ -385,7 +387,7 @@ def create_docx_exam_paper(
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
     Produces table layout with Revised Bloom's Taxonomy, OR choice formatting,
-    optional model answers, and optional cumulative totals tables at the end.
+    optional itemized marking schemes, optional model answers, and optional cumulative totals tables.
     """
     doc = docx.Document()
 
@@ -393,6 +395,7 @@ def create_docx_exam_paper(
     if is_student:
         include_source = False
         include_answers = False
+        include_marking_scheme = False
         include_totals = False
         include_knowledge_dim = False
         include_qa_flags = False
@@ -677,7 +680,9 @@ def create_docx_exam_paper(
     bt_run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
 
     # 5. Substep 2.1: Model Answers & Scheme of Evaluation (including OR format)
-    has_any_answers = include_answers and any(q.get("answer") for q in questions)
+    has_any_answers = (include_answers or include_marking_scheme) and any(
+        (q.get("answer") or q.get("marking_scheme")) for q in questions
+    )
     if has_any_answers:
         doc.add_page_break()
         ans_heading = doc.add_paragraph()
@@ -727,29 +732,140 @@ def create_docx_exam_paper(
             meta_r.font.size = Pt(8.5)
             meta_r.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
 
-            alternatives = _split_answer_alternatives(q)
-            if len(alternatives) > 1:
-                # Render answer alternatives with clear labeling (no internal OR)
-                for a_idx, alt in enumerate(alternatives, 1):
+            # Examiner Marking Scheme Table
+            scheme = q.get("marking_scheme")
+            if include_marking_scheme and scheme and isinstance(scheme, dict) and scheme.get("criteria"):
+                sp = doc.add_paragraph()
+                s_label = sp.add_run("Marking Scheme & Evaluation Breakdown:\n")
+                s_label.bold = True
+                s_label.font.size = Pt(9.5)
+                s_label.font.color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
+
+                crit_list = scheme.get("criteria", [])
+                cols = 5 if include_reasons else 4
+                s_table = doc.add_table(rows=len(crit_list) + 2, cols=cols)
+                s_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                s_table.autofit = False
+
+                if include_reasons:
+                    widths = [Inches(0.5), Inches(1.8), Inches(2.2), Inches(0.8), Inches(1.9)]
+                    headers = ["No.", "Criterion", "What Examiner Looks For", "Marks", "Reason"]
+                else:
+                    widths = [Inches(0.6), Inches(2.2), Inches(3.4), Inches(1.0)]
+                    headers = ["No.", "Criterion", "What Examiner Looks For", "Marks"]
+
+                # Header row
+                hdr_cells = s_table.rows[0].cells
+                for ci, (cell, w, h_text) in enumerate(zip(hdr_cells, widths, headers)):
+                    cell.width = w
+                    cell.text = h_text
+                    p = cell.paragraphs[0]
+                    if ci in (0, 3):
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for r in p.runs:
+                        r.bold = True
+                        r.font.size = Pt(8.5)
+                        r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                    shd = parse_xml(r'<w:shd {} w:fill="1E3A8A"/>'.format(nsdecls("w")))
+                    cell._tc.get_or_add_tcPr().append(shd)
+
+                tot_marks = 0.0
+                for ri, crit in enumerate(crit_list, 1):
+                    row_cells = s_table.rows[ri].cells
+                    c_marks = crit.get("marks", 0)
+                    try:
+                        tot_marks += float(c_marks)
+                    except (ValueError, TypeError):
+                        pass
+
+                    exp_text = str(crit.get("expected", ""))
+                    alts = crit.get("alternatives")
+                    if alts and isinstance(alts, list) and len(alts) > 0:
+                        exp_text += "\n― OR ―\n" + "\n".join(f"• {a}" for a in alts)
+
+                    vals = [
+                        str(crit.get("no", ri)),
+                        str(crit.get("criterion", "")),
+                        exp_text,
+                        str(c_marks),
+                    ]
+                    if include_reasons:
+                        vals.append(str(crit.get("reason", "")))
+
+                    for ci, (cell, w, val) in enumerate(zip(row_cells, widths, vals)):
+                        cell.width = w
+                        cell.text = val
+                        p = cell.paragraphs[0]
+                        if ci in (0, 3):
+                            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for r in p.runs:
+                            r.font.size = Pt(8.5)
+
+                # Total Row
+                tot_cells = s_table.rows[-1].cells
+                display_tot = scheme.get(
+                    "total_marks",
+                    int(tot_marks) if tot_marks.is_integer() else tot_marks,
+                )
+                tot_vals = ["", "Total Marks", "", str(display_tot)]
+                if include_reasons:
+                    tot_vals.append("")
+
+                for ci, (cell, w, val) in enumerate(zip(tot_cells, widths, tot_vals)):
+                    cell.width = w
+                    cell.text = val
+                    p = cell.paragraphs[0]
+                    if ci in (0, 3):
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for r in p.runs:
+                        r.bold = True
+                        r.font.size = Pt(8.5)
+                    shd = parse_xml(r'<w:shd {} w:fill="F1F5F9"/>'.format(nsdecls("w")))
+                    cell._tc.get_or_add_tcPr().append(shd)
+
+                if scheme.get("notes"):
+                    p_note = doc.add_paragraph()
+                    r_note = p_note.add_run(f"Examiner Guidance: {scheme['notes']}")
+                    r_note.italic = True
+                    r_note.font.size = Pt(8.0)
+                    r_note.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+
+                if scheme.get("is_fallback"):
+                    p_fb = doc.add_paragraph()
+                    r_fb = p_fb.add_run("* Auto-generated structure; review before use.")
+                    r_fb.italic = True
+                    r_fb.font.size = Pt(8.0)
+                    r_fb.font.color.rgb = RGBColor(0x94, 0xA3, 0xB8)
+
+                doc.add_paragraph("")
+
+            # Model Answer Section
+            if include_answers:
+                alternatives = _split_answer_alternatives(q)
+                if len(alternatives) > 1:
+                    # Render answer alternatives with clear labeling (no internal OR)
+                    for a_idx, alt in enumerate(alternatives, 1):
+                        ap = doc.add_paragraph()
+                        label = "Model Answer:\n" if a_idx == 1 else f"Alternative approach {a_idx - 1}:\n"
+                        a_label = ap.add_run(label)
+                        a_label.bold = True
+                        a_label.font.size = Pt(9.5)
+                        a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+                        add_docx_formatted_content(doc, alt, default_font_size=Pt(9.0))
+                elif alternatives:
                     ap = doc.add_paragraph()
-                    label = "Model Answer:\n" if a_idx == 1 else f"Alternative approach {a_idx - 1}:\n"
-                    a_label = ap.add_run(label)
+                    a_label = ap.add_run("Model Answer / Key Points:\n")
                     a_label.bold = True
                     a_label.font.size = Pt(9.5)
                     a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
-                    add_docx_formatted_content(doc, alt, default_font_size=Pt(9.0))
-            elif alternatives:
-                ap = doc.add_paragraph()
-                a_label = ap.add_run("Model Answer / Key Points:\n")
-                a_label.bold = True
-                a_label.font.size = Pt(9.5)
-                a_label.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
-                add_docx_formatted_content(doc, alternatives[0], default_font_size=Pt(9.0))
-            else:
-                doc.add_paragraph("Model answer pending evaluation.").italic = True
+                    add_docx_formatted_content(doc, alternatives[0], default_font_size=Pt(9.0))
+                else:
+                    doc.add_paragraph("Model answer pending evaluation.").italic = True
 
-            doc.add_paragraph("")
+                doc.add_paragraph("")
+
             prev_ans_q = q
+
 
     # 6. Substep 2.2: Add optional totals table at the end
     if include_totals:
@@ -919,6 +1035,8 @@ def create_pdf_exam_paper(
     include_knowledge_dim: bool = True,
     include_answers: bool = True,
     include_totals: bool = True,
+    include_marking_scheme: bool = True,
+    include_reasons: bool = True,
     totals_summary: Optional[dict[str, Any]] = None,
     profile: str = "faculty",
     exam_type: str = "SEE",
@@ -929,7 +1047,7 @@ def create_pdf_exam_paper(
     """Generate a formatted PDF exam question paper using ReportLab.
 
     Produces table layout with Revised Bloom's Taxonomy, OR choice formatting,
-    optional model answers, and optional cumulative totals tables at the end.
+    optional itemized marking schemes, optional model answers, and optional cumulative totals tables.
     """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -946,6 +1064,7 @@ def create_pdf_exam_paper(
     if is_student:
         include_source = False
         include_answers = False
+        include_marking_scheme = False
         include_totals = False
         include_knowledge_dim = False
         include_qa_flags = False
@@ -1273,7 +1392,9 @@ def create_pdf_exam_paper(
     )
 
     # 5. Substep 2.1: Model Answers in PDF
-    has_any_answers = include_answers and any(q.get("answer") for q in questions)
+    has_any_answers = (include_answers or include_marking_scheme) and any(
+        (q.get("answer") or q.get("marking_scheme")) for q in questions
+    )
     if has_any_answers:
         elements.append(PageBreak())
         elements.append(Paragraph("SCHEME OF EVALUATION & MODEL ANSWERS", title_style))
@@ -1304,26 +1425,117 @@ def create_pdf_exam_paper(
             elements.append(Paragraph(q_banner, styles["Normal"]))
             elements.append(Spacer(1, 2))
 
-            alternatives = _split_answer_alternatives(q)
-            if len(alternatives) > 1:
-                for a_idx, alt in enumerate(alternatives, 1):
-                    label = "Model Answer:" if a_idx == 1 else f"Alternative approach {a_idx - 1}:"
-                    elements.append(Paragraph(f"<b>{safe_xml_text(label)}</b>", ans_text_style))
-                    flow = format_pdf_cell_content(alt, ans_text_style)
+            # Marking Scheme Table in PDF
+            scheme = q.get("marking_scheme")
+            if include_marking_scheme and scheme and isinstance(scheme, dict) and scheme.get("criteria"):
+                elements.append(Paragraph("<b>Marking Scheme & Evaluation Breakdown:</b>", ans_text_style))
+                elements.append(Spacer(1, 3))
+
+                crit_list = scheme.get("criteria", [])
+                sch_flow_data = []
+
+                if include_reasons:
+                    hdr_row = ["No.", "Criterion", "What Examiner Looks For", "Marks", "Reason"]
+                    sch_col_widths = [30, 110, 175, 45, 160]
+                else:
+                    hdr_row = ["No.", "Criterion", "What Examiner Looks For", "Marks"]
+                    sch_col_widths = [35, 145, 270, 70]
+
+                sch_flow_data.append([
+                    Paragraph(f"<b>{safe_xml_text(h)}</b>", hdr_style) for h in hdr_row
+                ])
+
+                tot_marks = 0.0
+                for ri, crit in enumerate(crit_list, 1):
+                    c_marks = crit.get("marks", 0)
+                    try:
+                        tot_marks += float(c_marks)
+                    except (ValueError, TypeError):
+                        pass
+
+                    exp_text = str(crit.get("expected", ""))
+                    alts = crit.get("alternatives")
+                    if alts and isinstance(alts, list) and len(alts) > 0:
+                        exp_text = (
+                            safe_xml_text(exp_text)
+                            + "<br/><b>— OR —</b><br/>"
+                            + "<br/>".join(f"• {safe_xml_text(a)}" for a in alts)
+                        )
+                    else:
+                        exp_text = safe_xml_text(exp_text)
+
+                    row_vals = [
+                        safe_xml_text(str(crit.get("no", ri))),
+                        safe_xml_text(str(crit.get("criterion", ""))),
+                        exp_text,
+                        safe_xml_text(str(c_marks)),
+                    ]
+                    if include_reasons:
+                        row_vals.append(safe_xml_text(str(crit.get("reason", ""))))
+
+                    sch_flow_data.append([
+                        Paragraph(v, q_bold_cell if ci in (0, 3) else q_cell_style)
+                        for ci, v in enumerate(row_vals)
+                    ])
+
+                display_tot = scheme.get(
+                    "total_marks",
+                    int(tot_marks) if tot_marks.is_integer() else tot_marks,
+                )
+                tot_row = ["", "<b>Total Marks</b>", "", f"<b>{safe_xml_text(str(display_tot))}</b>"]
+                if include_reasons:
+                    tot_row.append("")
+
+                sch_flow_data.append([
+                    Paragraph(v, q_bold_cell) for v in tot_row
+                ])
+
+                t_sch = Table(sch_flow_data, colWidths=sch_col_widths, repeatRows=1, splitByRow=1)
+                t_sch.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+                    ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F1F5F9")),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("ALIGN", (3, 0), (3, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]))
+                elements.append(t_sch)
+
+                if scheme.get("notes"):
+                    elements.append(Spacer(1, 2))
+                    elements.append(Paragraph(f"<i>Examiner Guidance: {safe_xml_text(scheme['notes'])}</i>", styles["Normal"]))
+
+                if scheme.get("is_fallback"):
+                    elements.append(Spacer(1, 2))
+                    elements.append(Paragraph("<i>* Auto-generated structure; review before use.</i>", styles["Normal"]))
+
+                elements.append(Spacer(1, 6))
+
+            # Model Answer Section
+            if include_answers:
+                alternatives = _split_answer_alternatives(q)
+                if len(alternatives) > 1:
+                    for a_idx, alt in enumerate(alternatives, 1):
+                        label = "Model Answer:" if a_idx == 1 else f"Alternative approach {a_idx - 1}:"
+                        elements.append(Paragraph(f"<b>{safe_xml_text(label)}</b>", ans_text_style))
+                        flow = format_pdf_cell_content(alt, ans_text_style)
+                        if isinstance(flow, list):
+                            elements.extend(flow)
+                        else:
+                            elements.append(flow)
+                elif alternatives:
+                    elements.append(Paragraph("<b>Model Answer / Key Points:</b>", ans_text_style))
+                    flow = format_pdf_cell_content(alternatives[0], ans_text_style)
                     if isinstance(flow, list):
                         elements.extend(flow)
                     else:
                         elements.append(flow)
-            elif alternatives:
-                elements.append(Paragraph("<b>Model Answer / Key Points:</b>", ans_text_style))
-                flow = format_pdf_cell_content(alternatives[0], ans_text_style)
-                if isinstance(flow, list):
-                    elements.extend(flow)
-                else:
-                    elements.append(flow)
 
             elements.append(Spacer(1, 8))
             prev_ans_q = q
+
 
     # 6. Substep 2.2: Cumulative Totals Tables in PDF
     if include_totals:
