@@ -45,6 +45,7 @@ from config import (
 )
 from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_answer_prompt, build_prompt
+from generation.scheme_generator import build_fallback_scheme, generate_scheme
 from retrieval.sources import is_content_chunk, select_chunks_for_unit
 
 DANGLING_ENDINGS = {
@@ -1532,7 +1533,13 @@ def normalize_paper_question_numbers(questions: list[dict[str, Any]]) -> list[di
             q["question_no"] = new_qno
             sub = q.get("sub_index")
             if sub:
-                letter = chr(96 + int(sub))
+                if isinstance(sub, str) and sub.isalpha():
+                    letter = sub.lower()
+                else:
+                    try:
+                        letter = chr(96 + int(sub))
+                    except (ValueError, TypeError):
+                        letter = str(sub)
                 q["id"] = f"{new_qno}({letter})"
             else:
                 q["id"] = f"{new_qno}"
@@ -1554,7 +1561,13 @@ def normalize_paper_question_numbers(questions: list[dict[str, Any]]) -> list[di
                 q["question_no"] = curr_q_no
                 sub = q.get("sub_index") or (s_idx if has_subs else None)
                 if sub:
-                    letter = chr(96 + int(sub))
+                    if isinstance(sub, str) and sub.isalpha():
+                        letter = sub.lower()
+                    else:
+                        try:
+                            letter = chr(96 + int(sub))
+                        except (ValueError, TypeError):
+                            letter = str(sub)
                     q["id"] = f"{curr_q_no}({letter})"
                 else:
                     q["id"] = f"{curr_q_no}"
@@ -1771,6 +1784,12 @@ def generate_paper_by_slots(
                     "display_label": "",
                     "chapter": "",
                     "page": "",
+                    "marking_scheme": build_fallback_scheme(
+                        question=f"Placeholder for Unit {slot.get('unit')}",
+                        level=slot.get("level", "L2"),
+                        marks=slot.get("marks", 5),
+                        answer=specific_reason,
+                    ),
                 }
                 placeholder_questions.append(placeholder_q)
                 slot_copy = dict(slot)
@@ -1858,8 +1877,26 @@ def generate_paper_by_slots(
 
         # Deterministic slot chunk partitioning (Problem 2.2)
         # Disjoint chunk start for OR alternatives (Option A vs Option B) and sub-questions
-        sub_i = slot.get("sub_index", 1) or 1
-        q_no = slot.get("question_no", 1) or 1
+        sub_raw = slot.get("sub_index", 1) or 1
+        if isinstance(sub_raw, str):
+            if sub_raw.isalpha():
+                sub_i = ord(sub_raw.lower()[0]) - ord("a") + 1
+            else:
+                try:
+                    sub_i = int(sub_raw)
+                except (ValueError, TypeError):
+                    sub_i = 1
+        else:
+            try:
+                sub_i = int(sub_raw)
+            except (ValueError, TypeError):
+                sub_i = 1
+
+        q_raw = slot.get("question_no", 1) or 1
+        try:
+            q_no = int(q_raw)
+        except (ValueError, TypeError):
+            q_no = 1
         slot_offset = ((q_no - 1) * 3 + (sub_i - 1)) if (q_no and sub_i) else slot_idx
 
         slot_co = slot.get("co")
@@ -1895,6 +1932,12 @@ def generate_paper_by_slots(
                     "display_label": "",
                     "chapter": "",
                     "page": "",
+                    "marking_scheme": build_fallback_scheme(
+                        question=f"Placeholder for Unit {slot.get('unit')}",
+                        level=slot.get("level", "L2"),
+                        marks=slot.get("marks", 5),
+                        answer=specific_reason,
+                    ),
                 }
                 slot_copy = dict(slot)
                 slot_copy["reason_code"] = reason_code
@@ -2044,6 +2087,24 @@ def generate_paper_by_slots(
             rec["review_flags"] = []
             rec["needs_review"] = False
 
+            # Generate examiner marking scheme
+            try:
+                rec["marking_scheme"] = generate_scheme(
+                    question_record=rec,
+                    chunk=chunk,
+                    client=client,
+                    rng=slot_rng,
+                    force_regenerate=force_regenerate,
+                )
+            except Exception as sch_ex:
+                rec["marking_scheme"] = build_fallback_scheme(
+                    question=rec.get("question", ""),
+                    level=slot.get("level", "L2"),
+                    marks=slot.get("marks", 5),
+                    answer=rec.get("answer", ""),
+                    chunk_text=chunk.get("text", ""),
+                )
+
             if ans_rec.get("ungrounded_sentences"):
                 rec["ungrounded_sentences"] = ans_rec["ungrounded_sentences"]
                 rec["needs_review"] = True
@@ -2116,6 +2177,24 @@ def generate_paper_by_slots(
                         rec["kd"] = slot_kd
                         rec["review_flags"] = []
                         rec["needs_review"] = False
+
+                        # Generate examiner marking scheme
+                        try:
+                            rec["marking_scheme"] = generate_scheme(
+                                question_record=rec,
+                                chunk=fresh_chunk,
+                                client=client,
+                                rng=slot_rng,
+                                force_regenerate=force_regenerate,
+                            )
+                        except Exception as sch_ex:
+                            rec["marking_scheme"] = build_fallback_scheme(
+                                question=rec.get("question", ""),
+                                level=slot.get("level", "L2"),
+                                marks=slot.get("marks", 5),
+                                answer=rec.get("answer", ""),
+                                chunk_text=fresh_chunk.get("text", ""),
+                            )
                         with group_lock:
                             if alt_group and fresh_chunk.get("page_start"):
                                 used_pages_per_unit_group.setdefault((slot_unit, alt_group), set()).add(fresh_chunk["page_start"])
@@ -2195,7 +2274,7 @@ def generate_paper_by_slots(
                     reason_code, specific_reason, hint = classify_exception_to_reason_code(ex)
                     slot_i = slots[idx]
                     slot_id = slot_i.get("id") or slot_i.get("label") or f"Q{idx + 1:03d}"
-                    log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, error=str(ex))
+                    log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, exception_msg=str(ex))
                     slot_kd = normalize_knowledge_dimension(
                         slot_i.get("knowledge_dimension") or slot_i.get("kd")
                     )
@@ -2226,6 +2305,12 @@ def generate_paper_by_slots(
                         "display_label": "",
                         "chapter": "",
                         "page": "",
+                        "marking_scheme": build_fallback_scheme(
+                            question=f"Placeholder for Unit {slot_i.get('unit')}",
+                            level=slot_i.get("level", "L2"),
+                            marks=slot_i.get("marks", 5),
+                            answer=specific_reason,
+                        ),
                     }
                     slot_copy = dict(slot_i)
                     slot_copy["reason_code"] = reason_code

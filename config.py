@@ -48,4 +48,8 @@ EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5
 MAPPING_MIN_CONFIDENCE = float(os.getenv("MAPPING_MIN_CONFIDENCE", "0.45"))
 MAPPING_SUGGEST_CONFIDENCE = float(os.getenv("MAPPING_SUGGEST_CONFIDENCE", "0.25"))
 
+# Marking Scheme configuration
+ALLOW_HALF_MARKS: bool = os.getenv("ALLOW_HALF_MARKS", "false").lower() in ("1", "true", "yes")
+
+
 

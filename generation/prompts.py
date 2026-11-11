@@ -159,3 +159,107 @@ def build_answer_prompt(
         context=context.strip(),
         question=question.strip(),
     )
+
+
+SCHEME_BASE = """You are an expert exam evaluator creating a detailed, examiner-checkable MARKING SCHEME in strict JSON format.
+Using the question, Bloom's Taxonomy cognitive level, marks, and model answer below, break down the evaluation into specific checkable criteria with allocated marks.
+
+Allocation guidelines:
+- Total criteria marks must sum EXACTLY to {marks}.
+- More marks means more independent points, not longer ones. Prefer 1 mark per distinct checkable point; a typical criterion is 1-3 marks; avoid any single criterion above 40% of the total unless the question is a single procedure.
+- If the question asks to draw, illustrate, represent, or provide a diagram/flowchart, include a diagram criterion (~20-30% of marks) split between correct structure/layout and labelling accuracy.
+- Level-specific focus:
+  * L1 (remember: list, record, define): definition/points mostly.
+  * L2 (understand: explain, illustrate, articulate): definition + explanation + example/diagram.
+  * L3 (apply: formulate, demonstrate, solve): steps/commands and result/verification.
+  * L4 (analyze: infer, compare): analysis points + comparison/flow.
+  * L5-L6 (evaluate, create): criteria/justification with example, conclusion.
+- For command or code questions: allocate marks per correct step or command, plus output or verification.
+- If the question allows alternative valid answers, list them in the criterion's "alternatives" list.
+- Every criterion MUST have a non-empty "reason" explaining WHY it carries that many marks in terms of what the examiner is checking.
+
+Allowed kinds for each criterion: "definition", "explanation", "points", "diagram", "example", "steps", "code", "comparison", "analysis", "justification", "conclusion".
+
+Worked Example for a 10-mark L2 question:
+```json
+{{
+  "total_marks": 10,
+  "criteria": [
+    {{
+      "no": 1,
+      "criterion": "Definition of core concept",
+      "expected": "Clear definition of the core architecture and purpose.",
+      "marks": 1,
+      "kind": "definition",
+      "reason": "L2 questions start with recall of the concept; one mark for a correct definition.",
+      "partial_credit": null,
+      "alternatives": []
+    }},
+    {{
+      "no": 2,
+      "criterion": "Component breakdown",
+      "expected": "Identifies key components with their roles.",
+      "marks": 5,
+      "kind": "points",
+      "reason": "Five components are expected, each independently verifiable, so 1 mark each.",
+      "partial_credit": "1 mark per component identified",
+      "alternatives": []
+    }},
+    {{
+      "no": 3,
+      "criterion": "Architecture diagram and labelling",
+      "expected": "Diagram with labelled components and arrows showing the flow.",
+      "marks": 2,
+      "kind": "diagram",
+      "reason": "Diagram is required by the question and rewards layout (1M) and labelling (1M).",
+      "partial_credit": "1 mark for correct layout without complete labels",
+      "alternatives": []
+    }},
+    {{
+      "no": 4,
+      "criterion": "Component interaction workflow",
+      "expected": "Explanation of how components interact during execution.",
+      "marks": 2,
+      "kind": "explanation",
+      "reason": "Shows understanding beyond listing.",
+      "partial_credit": "1 mark for partial description",
+      "alternatives": []
+    }}
+  ],
+  "notes": "Accept equivalent technical terminology and valid component groupings."
+}}
+```
+
+Now generate the marking scheme JSON for:
+Question: {question}
+Bloom's Level: {level}
+Total Marks: {marks}
+Model Answer:
+\"\"\"
+{answer}
+\"\"\"{context_section}
+
+Output ONLY valid JSON starting with '{{' and ending with '}}'. No preamble, no conversational text, no markdown fences."""
+
+
+def build_scheme_prompt(
+    question: str,
+    level: str,
+    marks: int,
+    answer: str,
+    context: Optional[str] = "",
+) -> str:
+    """Build prompt instructing Ollama llama3.1:8b to generate a strict JSON marking scheme."""
+    norm_level = normalize_level(level) if level else "L2"
+    m = marks if marks is not None and marks > 0 else 5
+    ctx = (context or "").strip()
+    context_section = f"\n\nContext:\n\"\"\"\n{ctx}\n\"\"\"" if ctx else ""
+
+    return SCHEME_BASE.format(
+        question=question.strip(),
+        level=norm_level,
+        marks=m,
+        answer=(answer or "").strip(),
+        context_section=context_section,
+    )
+
