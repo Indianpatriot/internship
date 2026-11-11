@@ -3,7 +3,7 @@
 Defines the core data structures shared across ingestion, blueprinting,
 retrieval, generation, and export modules.
 """
-from typing import Any, Optional, TypedDict
+from typing import Any, Optional, TypedDict, Union
 
 DEFAULT_BT_WEIGHTS: dict[str, float] = {
     "L1-L2": 0.40,
@@ -16,6 +16,41 @@ TEACHER_BT_RANGES: dict[str, tuple[float, float]] = {
     "L3-L4": (0.30, 0.40),
     "L5-L6": (0.10, 0.20),
 }
+
+VALID_CRITERION_KINDS: set[str] = {
+    "definition",
+    "explanation",
+    "points",
+    "diagram",
+    "example",
+    "steps",
+    "code",
+    "comparison",
+    "analysis",
+    "justification",
+    "conclusion",
+}
+
+
+class SchemeCriterion(TypedDict, total=False):
+    """A single examiner-checkable criterion within a marking scheme."""
+    no: int
+    criterion: str
+    expected: str
+    marks: Union[int, float]
+    kind: str
+    reason: str
+    partial_credit: Optional[str]
+    alternatives: Optional[list[str]]
+
+
+class MarkingScheme(TypedDict, total=False):
+    """Examiner marking scheme breaking down expected criteria, marks, and reasons."""
+    total_marks: Union[int, float]
+    criteria: list[SchemeCriterion]
+    notes: Optional[str]
+    is_fallback: Optional[bool]
+
 
 
 class Slot(TypedDict, total=False):
@@ -62,6 +97,7 @@ class QuestionRecord(TypedDict, total=False):
     kd: str
     part: str
     alternative_group: Optional[str]
+    marking_scheme: Optional[MarkingScheme]
 
 
 class Weights(TypedDict, total=False):
@@ -114,3 +150,100 @@ def validate_weights(weights: dict[str, Any]) -> tuple[bool, list[str]]:
                 )
 
     return ok, warnings
+
+
+def validate_marking_scheme(
+    scheme: dict[str, Any],
+    expected_total: Union[int, float],
+) -> tuple[bool, list[str]]:
+    """Validate a MarkingScheme structure against the expected question marks.
+
+    Rules:
+    - criteria marks must sum EXACTLY to total_marks.
+    - total_marks must equal expected_total.
+    - Default granularity is whole marks; 0.5 marks are supported only when
+      config.ALLOW_HALF_MARKS is True.
+    - Every criterion must have a positive mark (> 0), a non-empty 'reason',
+      and a non-empty 'expected' string.
+    - Returns (ok, problems).
+    """
+    import config
+
+    problems: list[str] = []
+    if not isinstance(scheme, dict):
+        return False, ["Marking scheme must be a dictionary."]
+
+    total_marks = scheme.get("total_marks")
+    if total_marks is None:
+        problems.append("Marking scheme missing 'total_marks'.")
+    else:
+        try:
+            t_val = float(total_marks)
+            if abs(t_val - float(expected_total)) > 1e-6:
+                problems.append(
+                    f"Scheme total_marks ({total_marks}) does not match expected total ({expected_total})."
+                )
+        except (ValueError, TypeError):
+            problems.append(f"Invalid total_marks value: {total_marks}")
+
+    criteria = scheme.get("criteria")
+    if not isinstance(criteria, list) or len(criteria) == 0:
+        problems.append("Marking scheme must contain a non-empty 'criteria' list.")
+        return False, problems
+
+    criteria_sum = 0.0
+    allow_half = getattr(config, "ALLOW_HALF_MARKS", False)
+
+    for i, c in enumerate(criteria, 1):
+        if not isinstance(c, dict):
+            problems.append(f"Criterion #{i} is not a dictionary.")
+            continue
+
+        c_no = c.get("no", i)
+        c_marks = c.get("marks")
+        if c_marks is None:
+            problems.append(f"Criterion #{c_no} missing 'marks'.")
+        else:
+            try:
+                m_val = float(c_marks)
+                if m_val <= 0:
+                    problems.append(f"Criterion #{c_no} marks must be greater than zero, got {m_val}.")
+                else:
+                    criteria_sum += m_val
+                    if not allow_half:
+                        if not float(m_val).is_integer():
+                            problems.append(
+                                f"Criterion #{c_no} has fractional marks ({m_val}) but ALLOW_HALF_MARKS is False."
+                            )
+                    else:
+                        # Allow only multiples of 0.5
+                        if abs((m_val * 2) - round(m_val * 2)) > 1e-6:
+                            problems.append(
+                                f"Criterion #{c_no} marks ({m_val}) must be a multiple of 0.5."
+                            )
+            except (ValueError, TypeError):
+                problems.append(f"Criterion #{c_no} has invalid marks: {c_marks}.")
+
+        reason = c.get("reason")
+        if not reason or not str(reason).strip():
+            problems.append(f"Criterion #{c_no} missing or empty 'reason'.")
+
+        expected = c.get("expected")
+        if not expected or not str(expected).strip():
+            problems.append(f"Criterion #{c_no} missing or empty 'expected'.")
+
+        kind = c.get("kind")
+        if kind and kind not in VALID_CRITERION_KINDS:
+            problems.append(f"Criterion #{c_no} has invalid kind '{kind}'.")
+
+    if total_marks is not None:
+        try:
+            if abs(criteria_sum - float(total_marks)) > 1e-6:
+                problems.append(
+                    f"Criteria marks sum to {criteria_sum}, expected {total_marks}."
+                )
+        except (ValueError, TypeError):
+            pass
+
+    return len(problems) == 0, problems
+
