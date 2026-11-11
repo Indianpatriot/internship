@@ -62,7 +62,32 @@ class QuestionRecord(TypedDict, total=False):
     valid: bool                     # Whether generation passed validator & similarity check
     reason: str                     # Acceptance reason ("ok") or failure cause
     attempts: int                   # Number of LLM sampling attempts
+    marking_scheme: Optional[MarkingScheme] # Itemized examiner marking scheme
 ```
+
+### `MarkingScheme` & `SchemeCriterion`
+Defines an itemized, examiner-checkable criteria breakdown attached to each question:
+```python
+class SchemeCriterion(TypedDict, total=False):
+    no: int                         # Sequential criterion number (1, 2, ...)
+    criterion: str                  # Short label of what is expected
+    expected: str                   # What examiner should look for (specific items, keywords, steps)
+    marks: Union[int, float]        # Marks allocated to this criterion (> 0)
+    kind: str                       # One of "definition" | "explanation" | "points" | "diagram" | "example" | "steps" | "code" | "comparison" | "analysis" | "justification" | "conclusion"
+    reason: str                     # Pedagogical justification explaining why this part earns these marks
+    partial_credit: Optional[str]   # How to split marks if only partially answered
+    alternatives: Optional[list[str]] # List of alternative acceptable answers / approaches
+
+class MarkingScheme(TypedDict, total=False):
+    total_marks: Union[int, float]  # Question total marks (must match question's marks exactly)
+    criteria: list[SchemeCriterion] # Examiner checkable criteria summing exactly to total_marks
+    notes: Optional[str]            # Guidance / instructions for the examiner
+    is_fallback: Optional[bool]     # True if generated via rule-based fallback mechanism
+```
+
+- `validate_marking_scheme(scheme: dict[str, Any], expected_total: Union[int, float]) -> tuple[bool, list[str]]`:
+  Requires criteria marks to sum exactly to `total_marks`, and `total_marks` to equal `expected_total`. Rejects non-positive marks, missing reasons, or missing expected text. Allows half-marks (`0.5`) only when `config.ALLOW_HALF_MARKS` is `True`.
+
 
 ### `Weights`
 Defines target weight fractions for Bloom's cognitive bands and Course Outcomes:
@@ -136,6 +161,35 @@ def generate_answer(
 ) -> dict[str, Any]:
 ```
 **Returns**: `{"answer": str, "answer_alternatives": list[str], "valid": bool, "reason": str}`
+
+### `generate_scheme` (`generation/scheme_generator.py`)
+```python
+def generate_scheme(
+    question_record: dict[str, Any],
+    chunk: Optional[dict[str, Any]] = None,
+    client: Any = None,
+    rng: Optional[random.Random] = None,
+    max_retries: int = 3,
+    force_regenerate: bool = False,
+) -> MarkingScheme:
+```
+**Returns**: `MarkingScheme` dict containing `total_marks`, `criteria`, `notes`, and `is_fallback`.
+- Uses `build_scheme_prompt` to query the model for an itemized, examiner-checkable criteria breakdown.
+- Automatically repairs small mark discrepancies by adjusting candidate criteria.
+- Backed by `build_fallback_scheme(...)` guaranteeing valid, non-empty criteria with pedagogical reasons that sum exactly to the slot's marks.
+
+### `build_scheme_prompt` (`generation/prompts.py`)
+```python
+def build_scheme_prompt(
+    question: str,
+    level: str,
+    marks: int,
+    answer: str,
+    context: Optional[str] = "",
+) -> str:
+```
+**Returns**: Formatted prompt instructing Ollama/LLM to produce strict JSON-only marking scheme criteria breakdowns based on Bloom's cognitive level, marks, and model answer.
+
 
 ### `select_chunks_for_unit`
 ```python
@@ -289,3 +343,28 @@ Bob should call the following plain functions directly in `app.py` and `export_u
 | **7. Paper Generation** | `build_blueprint(...)`<br>`generate_full_paper(...)` | `from blueprint import build_blueprint`<br>`from generation.generator import generate_full_paper` |
 | **8. Paper Analytics & Dashboard**| `summarize(questions, targets=...)` | `from totals import summarize` |
 | **9. Word / PDF Table Export** | `totals_table_rows(summary)` | `from totals import totals_table_rows` |
+| **10. Marking Scheme Generation** | `generate_scheme(question_record, chunk, client)` | `from generation.scheme_generator import generate_scheme` |
+| **11. Word / PDF Export with Schemes** | `create_docx_exam_paper(..., include_marking_scheme=True, include_reasons=True)`<br>`create_pdf_exam_paper(..., include_marking_scheme=True, include_reasons=True)` | `from export_utils import create_docx_exam_paper, create_pdf_exam_paper` |
+
+---
+
+## 6. Examiner Marking Scheme Breakdown & Export Integration
+
+### Marking Scheme Structure
+Each question in `QuestionRecord` contains an itemized `marking_scheme`:
+- **Criteria**: Each criterion specifies `no`, `criterion`, `expected` (what examiner looks for), `marks`, `kind` (`definition`, `explanation`, `points`, `diagram`, `example`, `steps`, `code`, `comparison`, `analysis`, `justification`, `conclusion`), `reason` (pedagogical justification explaining why this part earns these marks), `partial_credit`, and `alternatives` (acceptable alternative solutions).
+- **Sum Rule**: Sum of criteria marks equals the question's total marks exactly.
+- **Granularity**: Whole marks by default; half-marks (`0.5`) supported when `config.ALLOW_HALF_MARKS` is enabled.
+- **Rule-based Fallback**: If LLM output fails validation after retries, `build_fallback_scheme` generates structured criteria from the model answer sentences and BT level templates (`is_fallback=True`).
+
+### UI & Document Export Integration
+- **Streamlit Results UI (`app.py`)**:
+  - Displays a collapsible expander `📋 Marking scheme: Question {id}` showing a structured table: `No | Criterion | What the examiner looks for | Marks | Reason`, along with a bold **Total Marks** row.
+  - Fallback schemes display subtle notice: `* (auto-generated structure; review before use)`.
+  - Keeps `💡 Model answer: Question {id}` as a separate collapsed expander.
+  - Export controls provide toggles: `"Include marking scheme in export"` (default on) and `"Include reasons"` (default on).
+- **Word & PDF Documents (`export_utils.py`)**:
+  - In faculty copies, adds an itemized marking scheme table per question under `SCHEME OF EVALUATION & MODEL ANSWERS`.
+  - Displays alternative solutions with `― OR ―`.
+  - In student copies (`profile="student"`), schemes and solutions are strictly omitted.
+
