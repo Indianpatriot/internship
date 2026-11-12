@@ -47,6 +47,7 @@ from generation.cache import get_cached_response, store_cached_response
 from generation.prompts import build_answer_prompt, build_prompt
 from generation.scheme_generator import build_fallback_scheme, generate_scheme
 from retrieval.sources import is_content_chunk, select_chunks_for_unit
+from retrieval.figure_search import find_figures_for_question, attach_figures_to_scheme
 
 DANGLING_ENDINGS = {
     "and", "the", "with", "impl", "ho", "availab", "by", "to", "or", "of", "in", "on",
@@ -1719,6 +1720,7 @@ def generate_paper_by_slots(
     existing_questions: Optional[list[str]] = None,
     excluded_chunk_ids: Optional[set[str]] = None,
     exclude_deprecated: bool = True,
+    figures: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Generate questions and model answers matching blueprint slots.
 
@@ -2489,6 +2491,22 @@ def generate_paper_by_slots(
                     q.setdefault("review_flags", []).append(f"{flag} {p} with {q_orig.get('id', 'earlier question')}")
                 else:
                     seen_paper_pages[p] = idx
+
+        # 10. Figure retrieval & scheme attachment
+        if figures and embedder is not None:
+            used_figs: set[str] = set()
+            for q in questions:
+                sch = q.get("marking_scheme")
+                matched = find_figures_for_question(
+                    question_record=q,
+                    source_chunk=chunk_map.get(q.get("chunk_id")),
+                    scheme=sch,
+                    figures=figures,
+                    embedder=embedder,
+                    used_figure_ids=used_figs,
+                )
+                if sch:
+                    attach_figures_to_scheme(sch, matched)
 
     # Normalize question numbers only if paper starts above Q1 (Problem 1.4)
     if questions and any(q.get("question_no") is not None for q in questions):
