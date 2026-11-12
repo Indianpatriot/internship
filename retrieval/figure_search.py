@@ -110,28 +110,34 @@ def find_figures_for_question(
     scored_candidates = []
     for i, fig in enumerate(figures):
         base_score = float(sims[i])
-        score = base_score
+        # Base semantic similarity must satisfy the threshold so proximity does not overpower mismatch
+        if base_score < threshold:
+            continue
 
+        boost = 0.0
         # Boost 1: Same book
         if ref_book_id and fig.get("book_id") == ref_book_id:
-            score += 0.08
+            boost += 0.08
 
         # Boost 2: Page within or adjacent to source chunk (+/- 2 pages)
         fig_p = fig.get("page", 0)
         if ref_page and fig_p > 0:
             p_dist = abs(fig_p - ref_page)
             if p_dist == 0:
-                score += 0.12
+                boost += 0.12
             elif p_dist <= 2:
-                score += 0.06
+                boost += 0.06
 
         # Boost 3: Same chapter
         if ref_chapter and fig.get("chapter") and fig.get("chapter") == ref_chapter:
-            score += 0.06
+            boost += 0.06
 
         # Boost 4: Caption with a clear figure label
         if fig.get("figure_label"):
-            score += 0.05
+            boost += 0.05
+
+        # Cap proximity/label boost at +0.25
+        score = base_score + min(boost, 0.25)
 
         # Penalize already used figures across unrelated questions
         fid = fig.get("figure_id", "")

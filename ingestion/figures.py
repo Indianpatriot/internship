@@ -160,7 +160,7 @@ def extract_figures(pdf_path: str, book_id: str = "book") -> list[Figure]:
 
     repeated_xrefs = {
         xref for xref, count in img_xref_counts.items()
-        if (count / float(total_pages)) > MAX_REPEATED_RATIO and total_pages > 2
+        if (count / float(total_pages)) > MAX_REPEATED_RATIO and count >= 2
     }
 
     figures: list[Figure] = []
@@ -212,7 +212,7 @@ def extract_figures(pdf_path: str, book_id: str = "book") -> list[Figure]:
                 r for r in drawing_rects
                 if (r.width * r.height) < (page_area * 0.90) and r.y1 > header_cutoff and r.y0 < footer_cutoff
             ]
-            if len(valid_drawings) >= 3:  # Vector diagrams consist of multiple strokes/boxes/lines
+            if len(valid_drawings) >= 1:  # Vector diagrams consist of strokes/boxes/lines
                 merged_drawings = _merge_rects(valid_drawings, pad=12.0)
                 for mr in merged_drawings:
                     # Clip to page bounds

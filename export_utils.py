@@ -8,6 +8,7 @@ Implements Paper Assembly & Export (Step 2 of UI and Export requirements):
 - Academic header formatting (University/Course, Duration, Max Marks, Covered Chapters)
 """
 import io
+import os
 import re
 import xml.sax.saxutils as saxutils
 from typing import Any, Optional, Union
