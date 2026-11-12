@@ -1,7 +1,7 @@
 # Handoff Documentation: Blueprint Engine, Answers & Multi-Book Retrieval
 
-**Authors**: Nitin (Contracts, Blueprint, Answers, Multi-Book Retrieval), Alice (Multi-Book Ingestion, Syllabus Parsing, Cumulative Totals)  
-**Teammates**: Alice, Bob (UI & Document Export), Nitin
+**Authors**: Blueprint & Generation Engine Owner, Ingestion & Syllabus Engine Owner  
+**Teammates**: Ingestion & Syllabus Owner, UI & Document Export Owner, Generation Engine Owner
 
 ---
 
@@ -9,17 +9,17 @@
 
 | Component | Owner | Status | Purpose |
 | :--- | :--- | :--- | :--- |
-| `contracts.py` | Nitin | **Complete** | Core data structures (`Slot`, `QuestionRecord`, `Weights`), Bloom's weights & validator |
-| `blueprint.py` (`build_blueprint`) | Nitin | **Complete** | Deficit-based greedy allocation engine for 50-mark and 100-mark presets |
-| `generation/generator.py` (`generate_answer`, `generate_full_paper`) | Nitin | **Complete** | Grounded model answer generation with `OR` alternative splitting, and full paper assembly |
-| `retrieval/sources.py` (`select_chunks_for_unit`) | Nitin | **Complete** | Multi-textbook chunk filtering by unit and chapter |
-| `ingestion/library.py` (`add_book`, `load_library`, `list_chapters`, `suggest_unit_sources`, `validate_unit_sources`) | Alice | **Complete** | Multi-textbook ingestion, disk caching, chapter indexing, and source mapping |
-| `scheme.py` (`parse_scheme`, `parse_scheme_text`, `map_topics_to_chapters`) | Alice | **Complete** | Syllabus PDF/text parsing (units, outcomes, hours, textbooks) and topic semantic mapping |
-| `totals.py` (`summarize`, `totals_table_rows`) | Alice | **Complete** | Cumulative totals, choice question weighting, target deviations, and export tables |
-| `stubs.py` | Alice / Nitin | **Implemented** | Forwards to `scheme.parse_scheme` and `totals.summarize` |
-| `app.py` & `export_utils.py` | Bob | **Bob's Domain** | Streamlit UI and Word/PDF export integration |
+| `contracts.py` | Generation Engine Owner | **Complete** | Core data structures (`Slot`, `QuestionRecord`, `Weights`), Bloom's weights & validator |
+| `blueprint.py` (`build_blueprint`) | Generation Engine Owner | **Complete** | Deficit-based greedy allocation engine for 50-mark and 100-mark presets |
+| `generation/generator.py` (`generate_answer`, `generate_full_paper`) | Generation Engine Owner | **Complete** | Grounded model answer generation with `OR` alternative splitting, and full paper assembly |
+| `retrieval/sources.py` (`select_chunks_for_unit`) | Generation Engine Owner | **Complete** | Multi-textbook chunk filtering by unit and chapter |
+| `ingestion/library.py` (`add_book`, `load_library`, `list_chapters`, `suggest_unit_sources`, `validate_unit_sources`) | Ingestion Owner | **Complete** | Multi-textbook ingestion, disk caching, chapter indexing, and source mapping |
+| `scheme.py` (`parse_scheme`, `parse_scheme_text`, `map_topics_to_chapters`) | Ingestion Owner | **Complete** | Syllabus PDF/text parsing (units, outcomes, hours, textbooks) and topic semantic mapping |
+| `totals.py` (`summarize`, `totals_table_rows`) | Ingestion Owner | **Complete** | Cumulative totals, choice question weighting, target deviations, and export tables |
+| `stubs.py` | Ingestion Owner / Generation Engine Owner | **Implemented** | Forwards to `scheme.parse_scheme` and `totals.summarize` |
+| `app.py` & `export_utils.py` | UI & Export Owner | **UI & Export Domain** | Streamlit UI and Word/PDF export integration |
 
-> **Note**: `app.py` and `export_utils.py` are strictly owned by Bob. Bob can import the plain functions documented below directly.
+> **Note**: `app.py` and `export_utils.py` are strictly owned by UI & Export Owner. The UI & export module can import the plain functions documented below directly.
 
 ---
 
@@ -102,7 +102,7 @@ class Weights(TypedDict, total=False):
 
 ---
 
-## 3. Nitin's Functions & Signatures
+## 3. Generation Engine Owner's Functions & Signatures
 
 ### `build_blueprint`
 ```python
@@ -203,7 +203,7 @@ def select_chunks_for_unit(
 
 ---
 
-## 4. Alice's Functions: Ingestion Library, Scheme Parsing & Totals
+## 4. Ingestion Owner's Functions: Ingestion Library, Scheme Parsing & Totals
 
 ### A. Multi-Book Ingestion Library (`ingestion/library.py`)
 
@@ -218,7 +218,7 @@ Ingests multiple textbook PDFs with SHA256 disk caching under `.cache/ingestion/
   ```
 
 #### `list_chapters(library: dict[str, Any], book_id: str) -> list[dict[str, Any]]`
-Provides chapters ordered by page appearance with chunk counts for Bob's chapter selector dropdown.
+Provides chapters ordered by page appearance with chunk counts for UI & Export Owner's chapter selector dropdown.
 - **Returns**: `[{"chapter": str, "chunks": int, "chunk_count": int, "page_start": int, "page_end": int}, ...]`
 - **Example**:
   ```python
@@ -316,7 +316,7 @@ Calculates exact marks, percentages, and question counts by Course Outcome, Bloo
   ```
 
 #### `totals_table_rows(summary: dict[str, Any]) -> dict[str, list[list[Any]]]`
-Transforms summary analytics into structured list-of-lists tables with totals ready for Bob's Word/PDF export without formatting logic.
+Transforms summary analytics into structured list-of-lists tables with totals ready for Word/PDF export without formatting logic.
 - **Returns**: `{"co_table": list[list[Any]], "bt_table": list[list[Any]]}`
 - **Example**:
   ```python
@@ -328,9 +328,9 @@ Transforms summary analytics into structured list-of-lists tables with totals re
 
 ---
 
-## 5. UI Integration Guide for Bob
+## 5. UI Integration Guide for UI & Export
 
-Bob should call the following plain functions directly in `app.py` and `export_utils.py`:
+The UI & export module should call the following plain functions directly in `app.py` and `export_utils.py`:
 
 | UI Step / Component | Function to Call | Import Location |
 | :--- | :--- | :--- |
@@ -368,3 +368,87 @@ Each question in `QuestionRecord` contains an itemized `marking_scheme`:
   - Displays alternative solutions with `― OR ―`.
   - In student copies (`profile="student"`), schemes and solutions are strictly omitted.
 
+
+---
+
+## 7. Textbook Figure Extraction & Scheme Diagrams
+
+### Overview
+Extracts diagrams and illustrations directly from textbook PDFs using PyMuPDF (raster images and vector line/shape drawings), indexes them with captions and nearby text, and attaches the most relevant figure to question marking schemes (for diagram/architecture/flowchart criteria). If no figure meets the threshold, the scheme honestly notes that no figure is available from the source text.
+
+### Data Contract (`contracts.py`)
+```python
+class Figure(TypedDict, total=False):
+    figure_id: str             # e.g., "fig_docker_in_action_p12_1"
+    book_id: str               # Source book identifier
+    book_title: str            # Clean book title
+    page: int                  # 1-based page number
+    bbox: list[float]          # Bounding box [x0, y0, x1, y1] on page
+    image_path: str            # Relative path to cached PNG on disk
+    caption: str               # Detected caption (e.g., "Figure 2.1 Docker engine architecture")
+    figure_label: Optional[str]# Normalized label (e.g., "Figure 2.1")
+    nearby_text: str           # Surrounding body text for semantic matching
+    width: int                 # Rendered image width in pixels
+    height: int                # Rendered image height in pixels
+    kind: str                  # "raster" (embedded image) or "vector" (clustered drawings)
+    chapter: Optional[str | int] # Source chapter name/number if resolved
+```
+Each `SchemeCriterion` contains an optional `figures: Optional[list[dict[str, Any]]]` list, and `MarkingScheme` contains `reference_figures: Optional[list[dict[str, Any]]]`.
+
+### Figure Extraction (`ingestion/figures.py`)
+- **Raster extraction**: Extracts raw image streams via PyMuPDF xrefs, rendering to PNG at 150 DPI.
+- **Vector extraction**: Clusters adjacent vector paths, strokes, and shapes into unified diagram bounding boxes.
+- **Junk filtering**: Drops small icons (< 100x80 px), extreme aspect ratios (> 5:1 or < 1:5), full-page background tint boxes (> 90% page area), and repeated publisher logos (images appearing on > 30% of pages).
+- **Caption resolution**: Searches above and below the diagram bounding box for "Figure X.Y", "Fig. X", or "Diagram" labels, combined with adjacent sentences.
+- **Disk caching**: Cached under `.cache/figures/<book_id>/<file_hash>/` with a metadata manifest `figures.json`.
+
+### Figure Retrieval & Ranking (`retrieval/figure_search.py`)
+- **Query synthesis**: Combines the question text and any marking scheme diagram criteria.
+- **Semantic scoring**: Computes cosine similarity against candidate figure descriptions using SentenceTransformer embeddings.
+- **Proximity & metadata boosts** (capped at +0.25):
+  - +0.08 if from the same book
+  - +0.12 if on the same or adjacent page (+/- 2 pages)
+  - +0.06 if within the same chapter
+  - +0.05 if caption includes an explicit figure label
+  - Boosts apply only when base semantic similarity meets the relevance threshold.
+- **Deduplication**: Penalizes figures already assigned to previous questions to ensure variety.
+- **Honest fallback**: If no figure meets `config.FIGURE_MIN_SCORE` (default 0.45), returns an empty list, and the scheme displays `No diagram available in source textbook`.
+
+### Configuration Flags (`config.py`)
+| Parameter | Default | Purpose |
+| :--- | :--- | :--- |
+| `EXTRACT_FIGURES` | `True` | Enable or disable figure extraction and retrieval |
+| `FIGURE_MIN_SCORE` | `0.45` | Minimum cosine similarity required to attach a figure |
+| `FIGURE_MAX_PER_QUESTION` | `2` | Maximum figures attached per question |
+| `FIGURE_MAX_WIDTH_PX` | `800` | Max rendered figure width in pixels |
+| `FIGURE_DPI` | `150` | DPI for vector rasterization and extraction |
+| `GEN_WORKERS` | `4` | Concurrency worker count for generation |
+
+---
+
+## 8. Performance Profiling & Optimization
+
+### Profiling Utility (`perf.py`)
+Provides the lightweight `@timed` and `timed()` context manager to track execution latency across pipeline stages:
+- Extraction & chunking
+- Ingestion & outcome scoring
+- Blueprint allocation
+- Question, answer & scheme generation
+- DOCX and PDF export
+
+### Benchmark Results (`data/samples/sample_book.pdf`)
+| Pipeline Stage | Cold Run (s) | Warm Run (s) | Improvement |
+| :--- | :--- | :--- | :--- |
+| PDF text extraction & chunking | 0.060 | 0.060 | Consistent sub-second extraction |
+| Chunk embedding & outcome scoring | 9.340 | 0.000 | 100% cache hit (sub-millisecond) |
+| Blueprint allocation | 0.002 | 0.002 | Instant greedy allocation |
+| Question, answer & scheme generation | 12.843 | 2.970 | 76.8% faster with cached responses |
+| DOCX export | 0.211 | 0.211 | Fast formatting and image embedding |
+| PDF export | 0.078 | 0.078 | Fast ReportLab flowables compilation |
+| **Total Pipeline Latency** | **22.534s** | **3.321s** | **85.3% overall speedup** |
+
+### Key Optimizations Applied
+1. **Embedding Model Singleton & GPU Acceleration**: Lazy-loaded once per process with thread-safe lock; automatically utilizes CUDA when available.
+2. **Vectorized Matrix Multiplication**: Outcome scoring computes batch cosine similarity using `numpy.dot` instead of iterative loops.
+3. **Multi-Level Caching**: Chunk embeddings and CO similarity matrices cached on disk in `.cache/ingestion/` and in-memory; figure PNGs cached in `.cache/figures/`.
+4. **Fast Diagram Detection**: Pre-filters questions using regex keyword checks before invoking semantic embedding searches.
