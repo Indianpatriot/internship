@@ -51,5 +51,14 @@ MAPPING_SUGGEST_CONFIDENCE = float(os.getenv("MAPPING_SUGGEST_CONFIDENCE", "0.25
 # Marking Scheme configuration
 ALLOW_HALF_MARKS: bool = os.getenv("ALLOW_HALF_MARKS", "false").lower() in ("1", "true", "yes")
 
+# Figure Extraction & Retrieval Configuration
+EXTRACT_FIGURES: bool = os.getenv("EXTRACT_FIGURES", "true").lower() in ("1", "true", "yes")
+GEN_WORKERS: int = int(os.getenv("GEN_WORKERS", str(GENERATION_WORKERS)))
+FIGURE_MIN_SCORE: float = float(os.getenv("FIGURE_MIN_SCORE", "0.45"))
+FIGURE_MAX_PER_QUESTION: int = int(os.getenv("FIGURE_MAX_PER_QUESTION", "2"))
+FIGURE_MAX_WIDTH_PX: int = int(os.getenv("FIGURE_MAX_WIDTH_PX", "1400"))
+FIGURE_DPI: int = int(os.getenv("FIGURE_DPI", "150"))
+
+
 
 

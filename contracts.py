@@ -42,6 +42,7 @@ class SchemeCriterion(TypedDict, total=False):
     reason: str
     partial_credit: Optional[str]
     alternatives: Optional[list[str]]
+    figures: Optional[list[dict[str, Any]]]
 
 
 class MarkingScheme(TypedDict, total=False):
@@ -50,6 +51,24 @@ class MarkingScheme(TypedDict, total=False):
     criteria: list[SchemeCriterion]
     notes: Optional[str]
     is_fallback: Optional[bool]
+    reference_figures: Optional[list[dict[str, Any]]]
+
+
+class Figure(TypedDict, total=False):
+    """Extracted figure record from a textbook page."""
+    figure_id: str
+    book_id: str
+    page: int
+    bbox: tuple[float, float, float, float]
+    image_path: str
+    caption: str
+    figure_label: str
+    nearby_text: str
+    chapter: Optional[str]
+    section: Optional[str]
+    kind: str  # "raster" | "vector"
+    width: int
+    height: int
 
 
 
