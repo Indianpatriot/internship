@@ -8,9 +8,12 @@ Optimized with:
 - Reused chunk embeddings for grounded answer cosine similarity
 """
 import concurrent.futures
+import json
+from pathlib import Path
 import random
 import re
 import threading
+import time
 from typing import Any, Optional, Union
 import config
 
@@ -44,8 +47,10 @@ from config import (
     QUESTION_SIMILARITY_DUPLICATE_THRESHOLD,
 )
 from generation.cache import get_cached_response, store_cached_response
-from generation.prompts import build_answer_prompt, build_prompt
-from generation.scheme_generator import build_fallback_scheme, generate_scheme
+from generation.prompts import build_answer_prompt, build_prompt, build_combined_answer_scheme_prompt
+from generation.scheme_generator import build_fallback_scheme, extract_json_object, generate_scheme, repair_scheme_marks
+from generation.ollama_client import get_num_predict_for_marks
+from contracts import validate_marking_scheme
 from retrieval.sources import is_content_chunk, select_chunks_for_unit
 from retrieval.figure_search import find_figures_for_question, attach_figures_to_scheme
 
@@ -848,13 +853,16 @@ def generate_question(
     context = " ".join(chunk["text"].split()[:MAX_CONTEXT_WORDS])
     has_numbers = bool(re.search(r"\b\d+(?:\.\d+)?\b", context))
     q, reason, attempts = "", "no output", 0
+    reason_code = ReasonCode.EMPTY_RESPONSE.value
     ok = False
 
     # Proportional token cap
     num_predict = getattr(config, "QUESTION_NUM_PREDICT", 120)
     client_model = getattr(client, "model", "llama3.1:8b")
+    is_mock = (client_model == "mock") or (getattr(client, "__class__", type("")).__name__ == "MockClient")
+    effective_retries = max_retries if is_mock else min(max_retries, 2)
 
-    for attempts in range(1, max_retries + 1):
+    for attempts in range(1, effective_retries + 1):
         # Sample verbs constrained by both Bloom's level and Knowledge Dimension (Problem 6)
         verbs = sample_kd_verbs(level, kd, k_verbs, rng)
         if not has_numbers:
@@ -875,6 +883,8 @@ def generate_question(
 
         q = clean_output(raw)
         ok, reason = validate_question(q, level)
+        if not ok:
+            reason_code = ReasonCode.BLOOM_VERB_FAIL.value if any(k in (reason or "").lower() for k in ("verb", "bloom", "level")) else ReasonCode.STEM_LINT.value
 
         # Check unseen material / relative references (Problem 4)
         if ok:
@@ -882,26 +892,31 @@ def generate_question(
             if has_unseen:
                 ok = False
                 reason = unseen_msg
+                reason_code = ReasonCode.STEM_LINT.value
 
         # Check textbook references
         if ok and has_textbook_reference(q):
             ok = False
             reason = "question contains textbook references"
+            reason_code = ReasonCode.STEM_LINT.value
 
         # Check truncation
         if ok and is_truncated_text(q, is_question=True):
             ok = False
             reason = "question is truncated"
+            reason_code = ReasonCode.STEM_LINT.value
 
         # Check circularity (Problem 5.4)
         if ok and is_circular_question(q):
             ok = False
             reason = "circular question"
+            reason_code = ReasonCode.STEM_LINT.value
 
         # Check compare entities in context (Problem 5.3)
         if ok and not check_compare_entities_in_context(q, context):
             ok = False
             reason = "compared entities not found in context"
+            reason_code = ReasonCode.GROUNDING_FAIL.value
 
         # Check numeric context for compute/calculate (Problem 5.5)
         if ok and not has_numbers and first_word(q) in ("compute", "calculate"):
@@ -909,6 +924,8 @@ def generate_question(
             new_v = nearest_valid_kd_verb("demonstrate", level, kd)
             q = replace_question_verb(q, new_v)
             ok, reason = validate_question(q, level)
+            if not ok:
+                reason_code = ReasonCode.BLOOM_VERB_FAIL.value
 
         # Check Knowledge Dimension verb alignment (Problem 5)
         if ok and knowledge_dimension:
@@ -918,17 +935,22 @@ def generate_question(
                 v_ok, _ = validate_question(corr_q, level)
                 if v_ok:
                     q = corr_q
+                else:
+                    reason_code = ReasonCode.BLOOM_VERB_FAIL.value
             else:
                 ok_kd, kd_reason = validate_question_kd(q, level, kd)
                 if not ok_kd:
                     if attempts < max_retries:
                         ok = False
                         reason = kd_reason
+                        reason_code = ReasonCode.BLOOM_VERB_FAIL.value
                     else:
                         old_verb = first_word(q)
                         new_verb = nearest_valid_kd_verb(old_verb, level, kd)
                         q = replace_question_verb(q, new_verb)
                         ok, reason = validate_question(q, level)
+                        if not ok:
+                            reason_code = ReasonCode.BLOOM_VERB_FAIL.value
 
         # Check demand limits and trailing choices (Problem 3.2 & 3.3)
         if ok:
@@ -937,11 +959,13 @@ def generate_question(
             if count_stem_demands(q) > max_dem and attempts < max_retries:
                 ok = False
                 reason = f"overloaded stem ({count_stem_demands(q)} demands > max {max_dem})"
+                reason_code = ReasonCode.STEM_LINT.value
 
         # Check underspecified stem (Problem 6.2)
         if ok and is_underspecified_stem(q):
             ok = False
             reason = "underspecified stem: refers to 'the tools' / 'the approach' without naming referent"
+            reason_code = ReasonCode.STEM_LINT.value
 
         # Check 8+ marks L1 multi-part recall (Problem 6.3)
         if ok:
@@ -949,6 +973,7 @@ def generate_question(
             if not ok_l1:
                 ok = False
                 reason = l1_msg
+                reason_code = ReasonCode.ANSWER_RUBRIC.value
 
         # Check stem linter (PART E)
         if ok:
@@ -956,6 +981,7 @@ def generate_question(
             if not ok_lint:
                 ok = False
                 reason = lint_msg
+                reason_code = ReasonCode.STEM_LINT.value
 
         # Check currency watchlist (PART E)
         if ok and exclude_deprecated:
@@ -963,6 +989,7 @@ def generate_question(
             if dep_terms:
                 ok = False
                 reason = f"stem contains deprecated technology '{dep_terms[0]}'"
+                reason_code = ReasonCode.OUTDATED.value
 
         # Outdated terms glossary replacement (Problem 6.4)
         if ok:
@@ -1051,6 +1078,7 @@ def generate_question(
         "kd": kd or "Conceptual",
         "valid": ok,
         "reason": reason,
+        "reason_code": reason_code,
         "attempts": attempts,
         "chunk_id": chunk.get("chunk_id"),
         "book_id": chunk.get("book_id"),
@@ -1206,6 +1234,7 @@ def generate_answer(
     last_answer = ""
     last_alternatives: list[str] = []
     reason = "no output"
+    reason_code = ReasonCode.EMPTY_RESPONSE.value
     ok = False
     ungrounded_sentences: list[str] = []
     demand_issue: Optional[str] = None
@@ -1218,8 +1247,10 @@ def generate_answer(
         num_predict = 500
 
     client_model = getattr(client, "model", "llama3.1:8b")
+    is_mock = (client_model == "mock") or (getattr(client, "__class__", type("")).__name__ == "MockClient")
+    effective_retries = max_retries if is_mock else min(max_retries, 2)
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, effective_retries + 1):
         temp = min(0.3 + 0.2 * (attempt - 1), 0.9)
         strict = (attempt > 1)
         prompt = build_answer_prompt(question, context, marks=marks, level=level, strict_grounding=strict)
@@ -1239,6 +1270,7 @@ def generate_answer(
         # Validation 1: non-empty
         if not last_answer:
             reason = "empty answer"
+            reason_code = ReasonCode.EMPTY_RESPONSE.value
             continue
 
         # Validation 2: minimum length for marks (except for short term recall questions)
@@ -1247,18 +1279,21 @@ def generate_answer(
         min_words = min(20, max(5, int(marks * 2))) if not is_term_q else 1
         if word_count < min_words:
             reason = f"answer length {word_count} words below minimum {min_words} for {marks} marks"
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             continue
 
         # Validation 2b: term answer validation (Problem 2.1)
         ok_term, term_msg = validate_term_answer(question, last_answer)
         if not ok_term:
             reason = term_msg
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             continue
 
         # Validation 2d: known technical fact validation (PART E)
         ok_facts, fact_msg = validate_known_technical_facts(question, last_answer)
         if not ok_facts:
             reason = fact_msg
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             continue
 
         # Outdated terms glossary replacement (Problem 6.4)
@@ -1270,20 +1305,24 @@ def generate_answer(
         has_unseen, unseen_msg = has_unseen_material_reference(last_answer, is_question=False)
         if has_unseen:
             reason = unseen_msg
+            reason_code = ReasonCode.GROUNDING_FAIL.value
             continue
         if has_banned_answer_phrases(last_answer):
             reason = "answer contains banned phrases (meta commentary / apology)"
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             continue
 
         # Validation 4: textbook references
         if has_textbook_reference(last_answer):
             reason = "answer contains textbook references"
+            reason_code = ReasonCode.GROUNDING_FAIL.value
             continue
 
         # Validation 5: truncation check
         if is_truncated_text(last_answer, is_question=False):
             if attempt < max_retries:
                 reason = "answer is truncated"
+                reason_code = ReasonCode.ANSWER_RUBRIC.value
                 continue
             else:
                 fallback = truncate_to_last_complete_sentence(last_answer)
@@ -1292,12 +1331,14 @@ def generate_answer(
                     last_alternatives = [fallback]
                 else:
                     reason = "answer is truncated"
+                    reason_code = ReasonCode.ANSWER_RUBRIC.value
                     continue
 
         # Validation 6: demand coverage check (Problem 5.2)
         cov_ok, cov_msg = check_demand_coverage(question, last_answer)
         if not cov_ok and attempt < max_retries:
             reason = cov_msg or "missing demanded question content"
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             demand_issue = cov_msg
             continue
 
@@ -1317,6 +1358,7 @@ def generate_answer(
                     overall_sim = float(np.dot(chunk_emb, ans_emb))
                     if overall_sim < ANSWER_MIN_SIMILARITY:
                         reason = f"similarity {overall_sim:.2f} below threshold {ANSWER_MIN_SIMILARITY}"
+                        reason_code = ReasonCode.GROUNDING_FAIL.value
                         continue
 
                     if sentences:
@@ -1328,6 +1370,7 @@ def generate_answer(
                         ungrounded_ratio = len(ungrounded_sentences) / len(sentences)
                         if ungrounded_ratio > ANSWER_MAX_UNGROUNDED_SENTENCE_RATIO and attempt < max_retries:
                             reason = f"ungrounded sentences ({len(ungrounded_sentences)}/{len(sentences)})"
+                            reason_code = ReasonCode.GROUNDING_FAIL.value
                             continue
                 except Exception:
                     pass
@@ -1336,10 +1379,12 @@ def generate_answer(
         ok_scheme, scheme_msg, _ = validate_evaluation_scheme(last_answer, marks, level=level)
         if not ok_scheme:
             reason = scheme_msg
+            reason_code = ReasonCode.ANSWER_RUBRIC.value
             continue
 
         ok = True
         reason = "ok"
+        reason_code = "OK"
         if not cached and not is_truncated_text(last_answer, is_question=False):
             store_cached_response(prompt, client_model, raw, temperature=temp)
         break
@@ -1349,12 +1394,121 @@ def generate_answer(
         "answer_alternatives": last_alternatives,
         "valid": ok,
         "reason": reason,
+        "reason_code": reason_code,
     }
     if ungrounded_sentences:
         res_dict["ungrounded_sentences"] = ungrounded_sentences
     if demand_issue and not ok:
         res_dict["demand_issue"] = demand_issue
     return res_dict
+
+
+def generate_answer_and_scheme(
+    question: str,
+    chunk: dict[str, Any],
+    marks: Optional[int],
+    client: Any,
+    rng: Optional[random.Random] = None,
+    force_regenerate: bool = False,
+    level: Optional[str] = None,
+    knowledge_dimension: Optional[str] = None,
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    """Single-call generation of model answer and itemized marking scheme.
+
+    Combines answer generation and rubric criteria generation into a single prompt,
+    validating criteria sum == marks and falling back to a repair call only upon failure.
+
+    Returns:
+        (answer_record, marking_scheme_dict_or_None)
+    """
+    m = marks if marks is not None and marks > 0 else 5
+    lvl = normalize_level(level) if level else "L2"
+    context = " ".join(chunk.get("text", "").split()[:MAX_CONTEXT_WORDS])
+
+    prompt = build_combined_answer_scheme_prompt(
+        question=question,
+        context=context,
+        marks=m,
+        level=lvl,
+    )
+    client_model = getattr(client, "model", "llama3.1:8b")
+    num_predict = min(600, get_num_predict_for_marks(m, is_answer=True) + 250)
+
+    cached = get_cached_response(prompt, client_model, temperature=0.2, force_regenerate=force_regenerate)
+    if cached:
+        raw = cached
+    else:
+        raw = client.generate(prompt, temperature=0.2, num_predict=num_predict)
+
+    parsed = extract_json_object(raw)
+    ans_text = ""
+    ans_alts: list[str] = []
+    scheme_dict = None
+
+    if parsed and isinstance(parsed, dict) and "answer" in parsed:
+        ans_text = str(parsed.get("answer", "")).strip()
+        ans_alts = list(parsed.get("answer_alternatives", [])) if isinstance(parsed.get("answer_alternatives"), list) else []
+        clean_ans, clean_alts = clean_answer_text(ans_text)
+        ans_text = clean_ans
+        if not ans_alts:
+            ans_alts = clean_alts or ([ans_text] if ans_text else [])
+        if not cached and raw:
+            store_cached_response(prompt, client_model, raw, temperature=0.2)
+
+        raw_crit = parsed.get("criteria")
+        if isinstance(raw_crit, list) and raw_crit:
+            cand_scheme = {
+                "total_marks": m,
+                "criteria": raw_crit,
+                "notes": str(parsed.get("notes", "")),
+                "is_fallback": False,
+            }
+            for idx, c in enumerate(cand_scheme["criteria"], 1):
+                if isinstance(c, dict):
+                    c.setdefault("no", idx)
+                    c.setdefault("kind", "explanation")
+                    c.setdefault("reason", f"Criterion {idx} evaluation")
+                    c.setdefault("expected", c.get("criterion", "Expected technical details"))
+
+            ok_scheme, _ = validate_marking_scheme(cand_scheme, m)
+            if not ok_scheme:
+                ok_scheme = repair_scheme_marks(cand_scheme, m)
+            if ok_scheme:
+                scheme_dict = cand_scheme
+
+    if not ans_text:
+        ans_text, ans_alts = clean_answer_text(raw)
+    if ans_text and not ans_alts:
+        ans_alts = [ans_text]
+
+    is_valid_ans = bool(ans_text and len(ans_text.split()) >= min(15, max(5, int(m * 2))))
+    ans_record = {
+        "answer": ans_text,
+        "answer_alternatives": ans_alts,
+        "valid": is_valid_ans,
+        "reason": "ok" if is_valid_ans else "empty or short answer",
+        "reason_code": "OK" if is_valid_ans else ReasonCode.EMPTY_RESPONSE.value,
+    }
+
+    if not scheme_dict:
+        try:
+            scheme_dict = generate_scheme(
+                question_record={"question": question, "marks": m, "level": lvl},
+                chunk=chunk,
+                client=client,
+                rng=rng,
+                force_regenerate=force_regenerate,
+            )
+        except Exception:
+            scheme_dict = build_fallback_scheme(
+                question=question,
+                level=lvl,
+                marks=m,
+                answer=ans_text,
+                chunk_text=context,
+            )
+
+    return ans_record, scheme_dict
 
 
 def generate_paper(chunks, level_counts, client, seed=None, marks=None, on_progress=None):
@@ -1475,7 +1629,7 @@ def verify_paper_completeness(
         a_text = q.get("answer", "")
         q_id = q.get("id") or f"Slot {i+1}"
         if not q_text or q_text.startswith("[NEEDS REVIEW") or q.get("needs_review") or not q.get("valid", True):
-            reason = q.get("review_reason") or q.get("reason") or "generation incomplete"
+            reason = q.get("review_reason") or (f"generation failed [{q.get('reason_code', ReasonCode.UNKNOWN_EXCEPTION.value)}]: {q.get('reason', 'criteria check failed')}")
             hint = q.get("hint")
             hint_str = f" (💡 {hint})" if hint else ""
             issues.append(f"{q_id}: {reason}{hint_str}")
@@ -1613,74 +1767,102 @@ def diagnose_slot_failure(
         codes = [str(r.get("reason_code", "")) for r in slot_rejected if r.get("reason_code")]
 
         # Timeout
-        if any("timeout" in r.lower() or c == ReasonCode.OLLAMA_TIMEOUT.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.OLLAMA_TIMEOUT.value in codes or any("timeout" in r.lower() for r in reasons):
             return (
                 "Ollama request timed out after multiple attempts",
                 "Lower worker count to 1-2 in settings or increase timeout.",
                 ReasonCode.OLLAMA_TIMEOUT.value,
             )
         # Connection
-        if any("connection" in r.lower() or c == ReasonCode.OLLAMA_CONN.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.OLLAMA_CONN.value in codes or any("connection" in r.lower() for r in reasons):
             return (
                 "Cannot connect to Ollama service",
                 "Ensure Ollama is running ('ollama serve') on configured host.",
                 ReasonCode.OLLAMA_CONN.value,
             )
         # Model not loaded
-        if any("not found" in r.lower() or "pull" in r.lower() or c == ReasonCode.MODEL_NOT_LOADED.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.MODEL_NOT_LOADED.value in codes or any("not found" in r.lower() or "pull" in r.lower() for r in reasons):
             return (
                 "Model is not loaded or available in Ollama",
                 "Run 'ollama pull <model>' to download the model.",
                 ReasonCode.MODEL_NOT_LOADED.value,
             )
-        # Grounding check failure
-        if any("grounding" in r.lower() or c == ReasonCode.GROUNDING_FAIL.value for r, c in zip(reasons, codes + [""] * len(reasons))):
-            return (
-                "all attempts failed factual grounding check against textbook text",
-                f"Select chapters with more detailed explanations for Unit {unit} or adjust target CO.",
-                ReasonCode.GROUNDING_FAIL.value,
-            )
-        # Bloom's / KD verb validation failure
-        if any("verb" in r.lower() or "bloom" in r.lower() or "kd" in r.lower() or c == ReasonCode.BLOOM_VERB_FAIL.value for r, c in zip(reasons, codes + [""] * len(reasons))):
-            return (
-                f"generated questions failed {bt} / {kd} verb validation",
-                f"Ensure source chapters contain material suitable for {bt} ({kd}) questions.",
-                ReasonCode.BLOOM_VERB_FAIL.value,
-            )
-        # Duplicate question failure
-        if any("duplicate" in r.lower() or "similarity" in r.lower() or c == ReasonCode.DUPLICATE.value for r, c in zip(reasons, codes + [""] * len(reasons))):
-            return (
-                "generated questions duplicated other questions in the paper",
-                f"Map additional chapters to Unit {unit} to provide greater topical diversity.",
-                ReasonCode.DUPLICATE.value,
-            )
         # Empty response
-        if any("empty" in r.lower() or c == ReasonCode.EMPTY_RESPONSE.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.EMPTY_RESPONSE.value in codes or any("empty" in r.lower() for r in reasons):
             return (
                 "LLM returned an empty response",
                 "Check model temperature and prompt parameters.",
                 ReasonCode.EMPTY_RESPONSE.value,
             )
         # JSON parse
-        if any("json" in r.lower() or c == ReasonCode.JSON_PARSE.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.JSON_PARSE.value in codes or any("json" in r.lower() for r in reasons):
             return (
                 "model failed to output structured JSON",
                 "Retry regeneration with fresh seed.",
                 ReasonCode.JSON_PARSE.value,
             )
+        # Grounding check failure
+        if ReasonCode.GROUNDING_FAIL.value in codes or any("grounding" in r.lower() for r in reasons):
+            return (
+                "all attempts failed factual grounding check against textbook text",
+                f"Select chapters with more detailed explanations for Unit {unit} or adjust target CO.",
+                ReasonCode.GROUNDING_FAIL.value,
+            )
+        # Ungrounded token
+        if ReasonCode.UNGROUNDED_TOKEN.value in codes or any("ungrounded" in r.lower() for r in reasons):
+            return (
+                "model answer referenced ungrounded tokens or technologies",
+                f"Ensure source context in Unit {unit} covers all referenced terminology.",
+                ReasonCode.UNGROUNDED_TOKEN.value,
+            )
+        # Bloom's / KD verb validation failure
+        if ReasonCode.BLOOM_VERB_FAIL.value in codes or any("verb" in r.lower() or "bloom" in r.lower() or "kd" in r.lower() for r in reasons):
+            return (
+                f"generated questions failed {bt} / {kd} verb validation",
+                f"Ensure source chapters contain material suitable for {bt} ({kd}) questions.",
+                ReasonCode.BLOOM_VERB_FAIL.value,
+            )
+        # Duplicate question failure
+        if ReasonCode.DUPLICATE.value in codes or any("duplicate" in r.lower() or "similarity" in r.lower() for r in reasons):
+            return (
+                "generated questions duplicated other questions in the paper",
+                f"Map additional chapters to Unit {unit} to provide greater topical diversity.",
+                ReasonCode.DUPLICATE.value,
+            )
         # Stem lint
-        if any("lint" in r.lower() or "premise" in r.lower() or "deictic" in r.lower() or "banned" in r.lower() or c == ReasonCode.STEM_LINT.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.STEM_LINT.value in codes or any("lint" in r.lower() or "premise" in r.lower() or "deictic" in r.lower() or "banned" in r.lower() for r in reasons):
             return (
                 "generated question failed stem quality linting",
                 "Select a different source chunk or revise prompt.",
                 ReasonCode.STEM_LINT.value,
             )
         # Answer rubric
-        if any("rubric" in r.lower() or c == ReasonCode.ANSWER_RUBRIC.value for r, c in zip(reasons, codes + [""] * len(reasons))):
+        if ReasonCode.ANSWER_RUBRIC.value in codes or any("rubric" in r.lower() for r in reasons):
             return (
                 "model answer failed rubric criteria",
                 "Ensure points sum to slot marks and required criteria are present.",
                 ReasonCode.ANSWER_RUBRIC.value,
+            )
+        # Scheme validation
+        if ReasonCode.SCHEME_VALIDATION.value in codes or any("scheme" in r.lower() for r in reasons):
+            return (
+                "marking scheme failed validation",
+                "Ensure criteria points sum to question marks.",
+                ReasonCode.SCHEME_VALIDATION.value,
+            )
+        # Outdated
+        if ReasonCode.OUTDATED.value in codes or any("deprecated" in r.lower() for r in reasons):
+            return (
+                "question references deprecated technologies",
+                "Update course syllabus or select newer textbook editions.",
+                ReasonCode.OUTDATED.value,
+            )
+        # Call budget exceeded
+        if ReasonCode.BUDGET_EXCEEDED.value in codes or any("budget" in r.lower() for r in reasons):
+            return (
+                "Slot call budget exceeded after multiple attempts",
+                "Check source chapter quality or raise MAX_SLOT_CALL_BUDGET.",
+                ReasonCode.BUDGET_EXCEEDED.value,
             )
         # Exception
         if any("exception" in r.lower() for r in reasons):
@@ -1705,6 +1887,151 @@ def diagnose_slot_failure(
     )
 
 
+class SlotBudgetExceededError(RuntimeError):
+    """Raised when a single slot exhausts its allocated LLM call budget."""
+    pass
+
+
+class SlotBudgetClient:
+    """Wraps an LLM client to enforce a hard cap on calls per question slot."""
+
+    def __init__(self, client: Any, max_budget: int = 6):
+        self._client = client
+        self.max_budget = max(1, max_budget)
+        self.quality_calls: int = 0
+        self.consecutive_timeouts = getattr(client, "consecutive_timeouts", 0)
+
+    @property
+    def model(self) -> str:
+        return getattr(self._client, "model", "")
+
+    @property
+    def call_history(self) -> list:
+        return getattr(self._client, "call_history", [])
+
+    @property
+    def last_metadata(self) -> dict:
+        return getattr(self._client, "last_metadata", {})
+
+    def generate(self, *args, **kwargs) -> str:
+        if self.quality_calls >= self.max_budget:
+            raise SlotBudgetExceededError(
+                f"Slot call budget of {self.max_budget} calls exceeded (used {self.quality_calls})"
+            )
+        self.quality_calls += 1
+        return self._client.generate(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+def resolve_worker_count(client: Any, requested_workers: Optional[int], slot_count: int) -> int:
+    """Resolve generation worker concurrency, enforcing clamp=1 for Ollama unless overridden."""
+    if slot_count <= 0:
+        return 1
+    allow_parallel_ollama = getattr(config, "ALLOW_PARALLEL_OLLAMA", False)
+    is_mock = (getattr(client, "model", "") == "mock") or (getattr(client, "__class__", type("")).__name__ == "MockClient")
+
+    if is_mock:
+        if requested_workers is not None:
+            return max(1, min(requested_workers, slot_count))
+        return max(1, min(GENERATION_WORKERS, slot_count))
+
+    # For Ollama client, force workers=1 everywhere unless allow_parallel_ollama is explicitly True
+    if not allow_parallel_ollama:
+        return 1
+
+    if requested_workers is not None:
+        return max(1, min(requested_workers, slot_count))
+
+    num_workers = min(2, GENERATION_WORKERS)
+    if getattr(client, "consecutive_timeouts", 0) >= 2:
+        num_workers = 1
+    return max(1, min(num_workers, slot_count))
+
+
+def get_checkpoint_path(session_id: str, cache_dir: str = ".cache") -> Path:
+    """Return the filesystem path for saving/loading generation progress."""
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    safe_session = re.sub(r"[^\w\-.]", "_", session_id)
+    return cache_path / f"generation_progress_{safe_session}.json"
+
+
+def save_generation_checkpoint(
+    session_id: str,
+    completed_slots: dict[Any, Any],
+    metadata: Optional[dict[str, Any]] = None,
+    cache_dir: str = ".cache",
+) -> Path:
+    """Incrementally persist completed slot generations to disk.
+
+    Args:
+        session_id: Session identifier string.
+        completed_slots: Mapping of slot_idx (int or str) -> slot result dict.
+        metadata: Optional extra metadata (e.g. total_slots, model, timestamps).
+        cache_dir: Base directory for cache files (defaults to .cache).
+
+    Returns:
+        Path to the saved checkpoint file.
+    """
+    path = get_checkpoint_path(session_id, cache_dir=cache_dir)
+    data = {
+        "session_id": session_id,
+        "updated_at": time.time(),
+        "metadata": metadata or {},
+        "completed_slots": {
+            str(k): v for k, v in completed_slots.items()
+        },
+    }
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+    temp_path.replace(path)
+    return path
+
+
+def load_generation_checkpoint(
+    session_id: str,
+    cache_dir: str = ".cache",
+) -> Optional[dict[str, Any]]:
+    """Load generation checkpoint from disk if present.
+
+    Returns:
+        Dict with keys: session_id, updated_at, metadata, completed_slots (with int keys), or None.
+    """
+    path = get_checkpoint_path(session_id, cache_dir=cache_dir)
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw_slots = data.get("completed_slots", {})
+        converted_slots = {}
+        for k, v in raw_slots.items():
+            try:
+                converted_slots[int(k)] = v
+            except (ValueError, TypeError):
+                converted_slots[k] = v
+        data["completed_slots"] = converted_slots
+        return data
+    except Exception:
+        return None
+
+
+def clear_generation_checkpoint(
+    session_id: str,
+    cache_dir: str = ".cache",
+) -> None:
+    """Remove checkpoint file from disk."""
+    path = get_checkpoint_path(session_id, cache_dir=cache_dir)
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def generate_paper_by_slots(
     chunks: list[dict[str, Any]],
     slots: list[dict[str, Any]],
@@ -1721,6 +2048,8 @@ def generate_paper_by_slots(
     excluded_chunk_ids: Optional[set[str]] = None,
     exclude_deprecated: bool = True,
     figures: Optional[list[dict[str, Any]]] = None,
+    session_id: Optional[str] = None,
+    cache_dir: str = ".cache",
 ) -> dict[str, Any]:
     """Generate questions and model answers matching blueprint slots.
 
@@ -1802,16 +2131,7 @@ def generate_paper_by_slots(
             return {"questions": placeholder_questions, "rejected": [], "unfilled": unfilled_slots}
         return {"questions": [], "rejected": [], "unfilled": list(slots)}
 
-    if workers is not None:
-        num_workers = workers
-    elif getattr(client, "model", "") == "mock":
-        num_workers = max(1, min(GENERATION_WORKERS, len(slots)))
-    else:
-        # Default Ollama workers 1-2 to prevent VRAM exhaustion / timeouts on 4 GB GPU
-        num_workers = min(2, GENERATION_WORKERS)
-        if getattr(client, "consecutive_timeouts", 0) >= 2:
-            num_workers = 1
-        num_workers = max(1, min(num_workers, len(slots)))
+    num_workers = resolve_worker_count(client, workers, len(slots))
 
     seen_lock = threading.Lock()
     group_lock = threading.Lock()
@@ -1827,11 +2147,15 @@ def generate_paper_by_slots(
     completed_questions_by_slot: dict[int, str] = {}
 
     def _process_single_slot(slot_idx: int, slot: dict[str, Any]) -> dict[str, Any]:
+        start_time = time.time()
         slot_rng = random.Random(seed + slot_idx * 1000 if seed is not None else None)
         slot_unit = slot.get("unit")
         alt_group = slot.get("alternative_group")
         slot_kd = slot.get("knowledge_dimension") or slot.get("kd") or "Conceptual"
         slot_id = slot.get("id") or slot.get("label") or f"Q{slot_idx + 1:03d}"
+
+        slot_budget = getattr(config, "MAX_SLOT_CALL_BUDGET", 6)
+        slot_client = SlotBudgetClient(client, max_budget=slot_budget)
 
         candidate_chunks = select_chunks_for_unit(usable, unit_sources, slot_unit)
         if not candidate_chunks:
@@ -1842,6 +2166,7 @@ def generate_paper_by_slots(
                 candidate_chunks = unexcluded
         if not candidate_chunks:
             specific_reason, hint, reason_code = diagnose_slot_failure(slot, [], [], unit_sources)
+            elapsed_time = round(time.time() - start_time, 2)
             placeholder_q = {
                 "question": f"[NEEDS REVIEW: {specific_reason}]",
                 "answer": f"[NEEDS REVIEW: {hint}]",
@@ -1851,6 +2176,8 @@ def generate_paper_by_slots(
                 "reason_code": reason_code,
                 "reason": specific_reason,
                 "hint": hint,
+                "elapsed_time": elapsed_time,
+                "calls_used": 0,
                 "review_flags": [f"generation_failed: {reason_code}"],
                 "marks": slot.get("marks", 0),
                 "unit": slot.get("unit"),
@@ -1874,8 +2201,19 @@ def generate_paper_by_slots(
             slot_copy["reason_code"] = reason_code
             slot_copy["reason"] = specific_reason
             slot_copy["hint"] = hint
+            slot_copy["elapsed_time"] = elapsed_time
+            slot_copy["calls_used"] = 0
             log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code)
-            return {"status": "placeholder" if keep_placeholders else "unfilled", "question": placeholder_q, "slot": slot_copy, "rejected": [], "slot_idx": slot_idx}
+            return {
+                "status": "placeholder" if keep_placeholders else "unfilled",
+                "question": placeholder_q,
+                "slot": slot_copy,
+                "rejected": [],
+                "slot_idx": slot_idx,
+                "elapsed_time": elapsed_time,
+                "calls_used": 0,
+                "reason_code": reason_code,
+            }
 
         # Deterministic slot chunk partitioning (Problem 2.2)
         # Disjoint chunk start for OR alternatives (Option A vs Option B) and sub-questions
@@ -1907,6 +2245,7 @@ def generate_paper_by_slots(
             matching_chunks = [c for c in candidate_chunks if c.get("co_scores", {}).get(slot_co, 0.0) > 0.05]
             if not matching_chunks:
                 specific_reason, hint, reason_code = diagnose_slot_failure(slot, candidate_chunks, [], unit_sources)
+                elapsed_time = round(time.time() - start_time, 2)
                 placeholder_q = {
                     "question": f"[NEEDS REVIEW: {specific_reason}]",
                     "answer": f"[NEEDS REVIEW: {hint}]",
@@ -1916,6 +2255,8 @@ def generate_paper_by_slots(
                     "reason_code": reason_code,
                     "reason": specific_reason,
                     "hint": hint,
+                    "elapsed_time": elapsed_time,
+                    "calls_used": 0,
                     "review_flags": [f"generation_failed: {reason_code}"],
                     "marks": slot.get("marks", 0),
                     "unit": slot.get("unit"),
@@ -1945,8 +2286,19 @@ def generate_paper_by_slots(
                 slot_copy["reason_code"] = reason_code
                 slot_copy["reason"] = specific_reason
                 slot_copy["hint"] = hint
+                slot_copy["elapsed_time"] = elapsed_time
+                slot_copy["calls_used"] = 0
                 log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code)
-                return {"status": "placeholder" if keep_placeholders else "unfilled", "question": placeholder_q, "slot": slot_copy, "rejected": [], "slot_idx": slot_idx}
+                return {
+                    "status": "placeholder" if keep_placeholders else "unfilled",
+                    "question": placeholder_q,
+                    "slot": slot_copy,
+                    "rejected": [],
+                    "slot_idx": slot_idx,
+                    "elapsed_time": elapsed_time,
+                    "calls_used": 0,
+                    "reason_code": reason_code,
+                }
             pool = sorted(
                 matching_chunks,
                 key=lambda c: c.get("co_scores", {}).get(slot_co, float("-inf")),
@@ -2021,6 +2373,13 @@ def generate_paper_by_slots(
         # Bounded retries: max 2 retries per failing slot (up to 3 attempts total)
         max_slot_tries = min(max(len(pool), 1) * 2, 3)
         for attempt_i in range(max_slot_tries):
+            if slot_client.quality_calls >= slot_budget:
+                slot_rejected.append({
+                    "valid": False,
+                    "reason": f"Slot call budget of {slot_budget} calls reached",
+                    "reason_code": "BUDGET_EXCEEDED",
+                })
+                break
             chunk = pool[attempt_i % len(pool)]
             if not is_content_chunk(chunk):
                 continue
@@ -2028,7 +2387,7 @@ def generate_paper_by_slots(
                 rec = generate_question(
                     chunk,
                     slot["level"],
-                    client,
+                    slot_client,
                     slot_rng,
                     marks=slot.get("marks"),
                     knowledge_dimension=slot_kd,
@@ -2036,6 +2395,13 @@ def generate_paper_by_slots(
                     force_regenerate=force_regenerate,
                     exclude_deprecated=exclude_deprecated,
                 )
+            except SlotBudgetExceededError:
+                slot_rejected.append({
+                    "valid": False,
+                    "reason": f"Slot call budget of {slot_budget} calls exceeded",
+                    "reason_code": "BUDGET_EXCEEDED",
+                })
+                break
             except Exception as e:
                 code_i, _, _ = classify_exception_to_reason_code(e)
                 c_val = code_i.value if hasattr(code_i, "value") else str(code_i)
@@ -2048,16 +2414,25 @@ def generate_paper_by_slots(
                 slot_rejected.append(rec)
                 continue
 
+            scheme_rec = None
             try:
-                ans_rec = generate_answer(
-                    rec["question"],
-                    chunk,
-                    slot.get("marks"),
-                    client,
+                ans_rec, scheme_rec = generate_answer_and_scheme(
+                    question=rec["question"],
+                    chunk=chunk,
+                    marks=slot.get("marks"),
+                    client=slot_client,
                     rng=slot_rng,
                     force_regenerate=force_regenerate,
                     level=slot.get("level"),
+                    knowledge_dimension=slot_kd,
                 )
+            except SlotBudgetExceededError:
+                slot_rejected.append({
+                    "valid": False,
+                    "reason": f"Slot call budget of {slot_budget} calls exceeded",
+                    "reason_code": "BUDGET_EXCEEDED",
+                })
+                break
             except Exception as e:
                 code_i, _, _ = classify_exception_to_reason_code(e)
                 c_val = code_i.value if hasattr(code_i, "value") else str(code_i)
@@ -2066,6 +2441,7 @@ def generate_paper_by_slots(
             if not ans_rec.get("valid"):
                 rec["valid"] = False
                 rec["reason"] = f"answer generation failed: {ans_rec.get('reason')}"
+                rec["reason_code"] = ans_rec.get("reason_code", ReasonCode.ANSWER_RUBRIC.value)
                 slot_rejected.append(rec)
                 continue
 
@@ -2088,24 +2464,28 @@ def generate_paper_by_slots(
             rec["kd"] = slot_kd
             rec["review_flags"] = []
             rec["needs_review"] = False
+            rec["calls_used"] = slot_client.quality_calls
 
-            # Generate examiner marking scheme
-            try:
-                rec["marking_scheme"] = generate_scheme(
-                    question_record=rec,
-                    chunk=chunk,
-                    client=client,
-                    rng=slot_rng,
-                    force_regenerate=force_regenerate,
-                )
-            except Exception as sch_ex:
-                rec["marking_scheme"] = build_fallback_scheme(
-                    question=rec.get("question", ""),
-                    level=slot.get("level", "L2"),
-                    marks=slot.get("marks", 5),
-                    answer=rec.get("answer", ""),
-                    chunk_text=chunk.get("text", ""),
-                )
+            # Use scheme from combined call, or fall back to repair call
+            if scheme_rec:
+                rec["marking_scheme"] = scheme_rec
+            else:
+                try:
+                    rec["marking_scheme"] = generate_scheme(
+                        question_record=rec,
+                        chunk=chunk,
+                        client=slot_client,
+                        rng=slot_rng,
+                        force_regenerate=force_regenerate,
+                    )
+                except Exception as sch_ex:
+                    rec["marking_scheme"] = build_fallback_scheme(
+                        question=rec.get("question", ""),
+                        level=slot.get("level", "L2"),
+                        marks=slot.get("marks", 5),
+                        answer=rec.get("answer", ""),
+                        chunk_text=chunk.get("text", ""),
+                    )
 
             if ans_rec.get("ungrounded_sentences"):
                 rec["ungrounded_sentences"] = ans_rec["ungrounded_sentences"]
@@ -2129,20 +2509,32 @@ def generate_paper_by_slots(
                 if slot_unit is not None:
                     seen_questions_in_unit.setdefault(slot_unit, []).append(rec["question"])
 
-            return {"status": "ok", "question": rec, "rejected": slot_rejected, "slot_idx": slot_idx}
+            elapsed_time = round(time.time() - start_time, 2)
+            rec["elapsed_time"] = elapsed_time
+            rec["calls_used"] = slot_client.quality_calls
+            rec["reason_code"] = None
+            return {
+                "status": "ok",
+                "question": rec,
+                "rejected": slot_rejected,
+                "slot_idx": slot_idx,
+                "elapsed_time": elapsed_time,
+                "calls_used": slot_client.quality_calls,
+                "reason_code": None,
+            }
 
-        # Try a fresh chunk set outside candidate pool once more before falling back
+        # Try a fresh chunk set outside candidate pool once more before falling back (only if budget allows)
         outside_pool = [
             c for c in candidate_chunks
             if c not in pool and is_content_chunk(c) and (not is_choice_unit or not unit_all_pages or len(unit_all_pages) < 2 or c.get("page_start") in assigned_pages)
         ]
-        if outside_pool:
+        if outside_pool and slot_client.quality_calls < slot_budget:
             fresh_chunk = slot_rng.choice(outside_pool)
             try:
                 rec = generate_question(
                     fresh_chunk,
                     slot["level"],
-                    client,
+                    slot_client,
                     slot_rng,
                     marks=slot.get("marks"),
                     knowledge_dimension=slot_kd,
@@ -2150,14 +2542,15 @@ def generate_paper_by_slots(
                     force_regenerate=force_regenerate,
                 )
                 if rec.get("valid"):
-                    ans_rec = generate_answer(
-                        rec["question"],
-                        fresh_chunk,
-                        slot.get("marks"),
-                        client,
+                    ans_rec, scheme_rec = generate_answer_and_scheme(
+                        question=rec["question"],
+                        chunk=fresh_chunk,
+                        marks=slot.get("marks"),
+                        client=slot_client,
                         rng=slot_rng,
                         force_regenerate=force_regenerate,
                         level=slot.get("level"),
+                        knowledge_dimension=slot_kd,
                     )
                     if ans_rec.get("valid"):
                         rec["answer"] = ans_rec["answer"]
@@ -2179,30 +2572,47 @@ def generate_paper_by_slots(
                         rec["kd"] = slot_kd
                         rec["review_flags"] = []
                         rec["needs_review"] = False
+                        rec["calls_used"] = slot_client.quality_calls
 
-                        # Generate examiner marking scheme
-                        try:
-                            rec["marking_scheme"] = generate_scheme(
-                                question_record=rec,
-                                chunk=fresh_chunk,
-                                client=client,
-                                rng=slot_rng,
-                                force_regenerate=force_regenerate,
-                            )
-                        except Exception as sch_ex:
-                            rec["marking_scheme"] = build_fallback_scheme(
-                                question=rec.get("question", ""),
-                                level=slot.get("level", "L2"),
-                                marks=slot.get("marks", 5),
-                                answer=rec.get("answer", ""),
-                                chunk_text=fresh_chunk.get("text", ""),
-                            )
+                        if scheme_rec:
+                            rec["marking_scheme"] = scheme_rec
+                        else:
+                            try:
+                                rec["marking_scheme"] = generate_scheme(
+                                    question_record=rec,
+                                    chunk=fresh_chunk,
+                                    client=slot_client,
+                                    rng=slot_rng,
+                                    force_regenerate=force_regenerate,
+                                )
+                            except Exception as sch_ex:
+                                rec["marking_scheme"] = build_fallback_scheme(
+                                    question=rec.get("question", ""),
+                                    level=slot.get("level", "L2"),
+                                    marks=slot.get("marks", 5),
+                                    answer=rec.get("answer", ""),
+                                    chunk_text=fresh_chunk.get("text", ""),
+                                )
                         with group_lock:
                             if alt_group and fresh_chunk.get("page_start"):
                                 used_pages_per_unit_group.setdefault((slot_unit, alt_group), set()).add(fresh_chunk["page_start"])
                             if fresh_chunk.get("page_start"):
                                 used_source_pages.add(fresh_chunk["page_start"])
-                        return {"status": "ok", "question": rec, "rejected": slot_rejected, "slot_idx": slot_idx}
+                        elapsed_time = round(time.time() - start_time, 2)
+                        rec["elapsed_time"] = elapsed_time
+                        rec["calls_used"] = slot_client.quality_calls
+                        rec["reason_code"] = None
+                        return {
+                            "status": "ok",
+                            "question": rec,
+                            "rejected": slot_rejected,
+                            "slot_idx": slot_idx,
+                            "elapsed_time": elapsed_time,
+                            "calls_used": slot_client.quality_calls,
+                            "reason_code": None,
+                        }
+            except SlotBudgetExceededError:
+                slot_rejected.append({"valid": False, "reason": f"Slot call budget of {slot_budget} calls exceeded", "reason_code": "BUDGET_EXCEEDED"})
             except Exception as ex:
                 code_i, _, _ = classify_exception_to_reason_code(ex)
                 c_val = code_i.value if hasattr(code_i, "value") else str(code_i)
@@ -2210,6 +2620,7 @@ def generate_paper_by_slots(
 
         # All retries failed: build placeholder (Problem 1)
         specific_reason, hint, reason_code = diagnose_slot_failure(slot, candidate_chunks, slot_rejected, unit_sources)
+        elapsed_time = round(time.time() - start_time, 2)
         placeholder_q = {
             "question": f"[NEEDS REVIEW: {specific_reason}]",
             "answer": f"[NEEDS REVIEW: Model answer generation failed - {specific_reason}]",
@@ -2219,6 +2630,8 @@ def generate_paper_by_slots(
             "reason_code": reason_code,
             "reason": specific_reason,
             "hint": hint,
+            "calls_used": slot_client.quality_calls,
+            "elapsed_time": elapsed_time,
             "review_flags": [f"generation_failed: {reason_code}"],
             "marks": slot.get("marks", 0),
             "unit": slot.get("unit"),
@@ -2242,94 +2655,157 @@ def generate_paper_by_slots(
         slot_copy["reason_code"] = reason_code
         slot_copy["reason"] = specific_reason
         slot_copy["hint"] = hint
+        slot_copy["calls_used"] = slot_client.quality_calls
+        slot_copy["elapsed_time"] = elapsed_time
         log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code)
-        return {"status": "placeholder", "question": placeholder_q, "slot": slot_copy, "rejected": slot_rejected, "slot_idx": slot_idx}
+        return {
+            "status": "placeholder",
+            "question": placeholder_q,
+            "slot": slot_copy,
+            "rejected": slot_rejected,
+            "slot_idx": slot_idx,
+            "elapsed_time": elapsed_time,
+            "calls_used": slot_client.quality_calls,
+            "reason_code": reason_code,
+        }
 
+    checkpoint_lock = threading.Lock()
+    completed_slots_checkpoint: dict[int, Any] = {}
     results_by_index: list[Optional[dict[str, Any]]] = [None] * len(slots)
+
+    # If session_id provided and not force_regenerate, resume completed slots from disk
+    if session_id and not force_regenerate:
+        cached_data = load_generation_checkpoint(session_id, cache_dir=cache_dir)
+        if cached_data and "completed_slots" in cached_data:
+            for s_idx_raw, s_res in cached_data["completed_slots"].items():
+                try:
+                    s_idx = int(s_idx_raw)
+                except (ValueError, TypeError):
+                    continue
+                if 0 <= s_idx < len(slots):
+                    if s_res.get("status") == "ok" and s_res.get("question", {}).get("valid", True):
+                        results_by_index[s_idx] = s_res
+                        completed_slots_checkpoint[s_idx] = s_res
+                        q_rec = s_res["question"]
+                        seen_questions.append(q_rec.get("question", ""))
+                        if q_rec.get("unit") is not None:
+                            seen_questions_in_unit.setdefault(q_rec["unit"], []).append(q_rec.get("question", ""))
+                        if q_rec.get("chunk_id"):
+                            alt = q_rec.get("alternative_group")
+                            if alt:
+                                used_chunks_per_group.setdefault(alt, set()).add(q_rec["chunk_id"])
+                            if q_rec.get("unit") is not None:
+                                used_chunks_per_unit.setdefault(q_rec["unit"], set()).add(q_rec["chunk_id"])
+
+    def _on_slot_done(idx: int, res: dict[str, Any]) -> None:
+        results_by_index[idx] = res
+        if session_id:
+            with checkpoint_lock:
+                completed_slots_checkpoint[idx] = res
+                save_generation_checkpoint(
+                    session_id=session_id,
+                    completed_slots=completed_slots_checkpoint,
+                    metadata={"total_slots": len(slots)},
+                    cache_dir=cache_dir,
+                )
+        if on_progress:
+            try:
+                on_progress(res.get("question") or res.get("slot") or slots[idx])
+            except Exception:
+                pass
 
     if num_workers <= 1 or len(slots) <= 1:
         for idx, slot in enumerate(slots):
+            if results_by_index[idx] is not None:
+                if on_progress:
+                    try:
+                        on_progress(results_by_index[idx].get("question") or slot)
+                    except Exception:
+                        pass
+                continue
             res = _process_single_slot(idx, slot)
-            results_by_index[idx] = res
-            if on_progress:
-                try:
-                    on_progress(res.get("question") or slot)
-                except Exception:
-                    pass
+            _on_slot_done(idx, res)
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_idx = {
-                executor.submit(_process_single_slot, idx, slot): idx
-                for idx, slot in enumerate(slots)
-            }
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    res = future.result()
-                    results_by_index[idx] = res
-                    if on_progress:
-                        try:
-                            on_progress(res.get("question") or slots[idx])
-                        except Exception:
-                            pass
-                except Exception as ex:
-                    reason_code, specific_reason, hint = classify_exception_to_reason_code(ex)
-                    slot_i = slots[idx]
-                    slot_id = slot_i.get("id") or slot_i.get("label") or f"Q{idx + 1:03d}"
-                    log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, exception_msg=str(ex))
-                    slot_kd = normalize_knowledge_dimension(
-                        slot_i.get("knowledge_dimension") or slot_i.get("kd")
-                    )
-                    placeholder_q = {
-                        "question": f"[NEEDS REVIEW: {specific_reason}]",
-                        "answer": f"[NEEDS REVIEW: {hint}]",
-                        "valid": False,
-                        "needs_review": True,
-                        "review_reason": f"needs review [{reason_code}]: {specific_reason}",
-                        "reason_code": reason_code,
-                        "reason": specific_reason,
-                        "hint": hint,
-                        "review_flags": [f"generation_failed: {reason_code}"],
-                        "marks": slot_i.get("marks", 0),
-                        "unit": slot_i.get("unit"),
-                        "co": slot_i.get("co", "CO1"),
-                        "bloom": slot_i.get("level") or slot_i.get("bloom", "L2"),
-                        "level": slot_i.get("level") or slot_i.get("bloom", "L2"),
-                        "bt_level": slot_i.get("bt_level") or slot_i.get("level") or "L2",
-                        "knowledge_dimension": slot_kd,
-                        "kd": slot_kd,
-                        "id": slot_id,
-                        "question_no": slot_i.get("question_no"),
-                        "sub_index": slot_i.get("sub_index"),
-                        "alternative_group": slot_i.get("alternative_group", ""),
-                        "book_id": "",
-                        "book_title": "",
-                        "display_label": "",
-                        "chapter": "",
-                        "page": "",
-                        "marking_scheme": build_fallback_scheme(
-                            question=f"Placeholder for Unit {slot_i.get('unit')}",
-                            level=slot_i.get("level", "L2"),
-                            marks=slot_i.get("marks", 5),
-                            answer=specific_reason,
-                        ),
-                    }
-                    slot_copy = dict(slot_i)
-                    slot_copy["reason_code"] = reason_code
-                    slot_copy["reason"] = specific_reason
-                    slot_copy["hint"] = hint
-                    results_by_index[idx] = {
-                        "status": "placeholder" if keep_placeholders else "unfilled",
-                        "question": placeholder_q,
-                        "slot": slot_copy,
-                        "rejected": [{"valid": False, "reason": str(ex), "reason_code": reason_code}],
-                        "slot_idx": idx,
-                    }
-                    if on_progress:
-                        try:
-                            on_progress(placeholder_q if keep_placeholders else slots[idx])
-                        except Exception:
-                            pass
+        slots_to_run = [(idx, slot) for idx, slot in enumerate(slots) if results_by_index[idx] is None]
+        if on_progress:
+            for idx in range(len(slots)):
+                if results_by_index[idx] is not None:
+                    try:
+                        on_progress(results_by_index[idx].get("question") or slots[idx])
+                    except Exception:
+                        pass
+        if slots_to_run:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_process_single_slot, idx, slot): idx
+                    for idx, slot in slots_to_run
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        res = future.result()
+                        _on_slot_done(idx, res)
+                    except Exception as ex:
+                        reason_code, specific_reason, hint = classify_exception_to_reason_code(ex)
+                        slot_i = slots[idx]
+                        slot_id = slot_i.get("id") or slot_i.get("label") or f"Q{idx + 1:03d}"
+                        log_slot_attempt(slot_id, 0, "failed", reason_code=reason_code, exception_msg=str(ex))
+                        slot_kd = normalize_knowledge_dimension(
+                            slot_i.get("knowledge_dimension") or slot_i.get("kd")
+                        )
+                        placeholder_q = {
+                            "question": f"[NEEDS REVIEW: {specific_reason}]",
+                            "answer": f"[NEEDS REVIEW: {hint}]",
+                            "valid": False,
+                            "needs_review": True,
+                            "review_reason": f"needs review [{reason_code}]: {specific_reason}",
+                            "reason_code": reason_code,
+                            "reason": specific_reason,
+                            "hint": hint,
+                            "review_flags": [f"generation_failed: {reason_code}"],
+                            "marks": slot_i.get("marks", 0),
+                            "unit": slot_i.get("unit"),
+                            "co": slot_i.get("co", "CO1"),
+                            "bloom": slot_i.get("level") or slot_i.get("bloom", "L2"),
+                            "level": slot_i.get("level") or slot_i.get("bloom", "L2"),
+                            "bt_level": slot_i.get("bt_level") or slot_i.get("level") or "L2",
+                            "knowledge_dimension": slot_kd,
+                            "kd": slot_kd,
+                            "id": slot_id,
+                            "question_no": slot_i.get("question_no"),
+                            "sub_index": slot_i.get("sub_index"),
+                            "alternative_group": slot_i.get("alternative_group", ""),
+                            "book_id": "",
+                            "book_title": "",
+                            "display_label": "",
+                            "chapter": "",
+                            "page": "",
+                            "marking_scheme": build_fallback_scheme(
+                                question=f"Placeholder for Unit {slot_i.get('unit')}",
+                                level=slot_i.get("level", "L2"),
+                                marks=slot_i.get("marks", 5),
+                                answer=specific_reason,
+                            ),
+                            "elapsed_time": 0.0,
+                            "calls_used": 0,
+                        }
+                        slot_copy = dict(slot_i)
+                        slot_copy["reason_code"] = reason_code
+                        slot_copy["reason"] = specific_reason
+                        slot_copy["hint"] = hint
+                        slot_copy["elapsed_time"] = 0.0
+                        slot_copy["calls_used"] = 0
+                        res = {
+                            "status": "placeholder" if keep_placeholders else "unfilled",
+                            "question": placeholder_q,
+                            "slot": slot_copy,
+                            "rejected": [{"valid": False, "reason": str(ex), "reason_code": reason_code}],
+                            "slot_idx": idx,
+                            "elapsed_time": 0.0,
+                            "calls_used": 0,
+                            "reason_code": reason_code,
+                        }
+                        _on_slot_done(idx, res)
 
     questions = []
     rejected = []
@@ -2535,6 +3011,8 @@ def regenerate_missing_slots(
     ctx: Optional[Union[dict[str, Any], list[dict[str, Any]]]] = None,
     result: Optional[dict[str, Any]] = None,
     seed_bump: int = 1,
+    session_id: Optional[str] = None,
+    cache_dir: str = ".cache",
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Regenerate ONLY failed/incomplete slots, leaving all accepted questions untouched.
@@ -2544,11 +3022,19 @@ def regenerate_missing_slots(
              unit_sources, client/client_config, seed, etc.
         result: Current generation result dict containing questions, unfilled, rejected.
         seed_bump: Multiplier for seed bump to ensure fresh random generation.
+        session_id: Optional session identifier for disk checkpoint persistence.
+        cache_dir: Directory where checkpoints are stored (defaults to .cache).
         **kwargs: Backward compatibility arguments (questions, slots, chunks, client, etc.).
 
     Returns:
         Updated result dict with questions, unfilled, rejected, and covered_chapters.
     """
+    if session_id is None and isinstance(ctx, dict):
+        session_id = ctx.get("session_id")
+    if "session_id" in kwargs and session_id is None:
+        session_id = kwargs["session_id"]
+    if "cache_dir" in kwargs:
+        cache_dir = kwargs["cache_dir"]
     # 1. Handle legacy signature: (questions, slots, chunks, client, seed, unit_sources, outcomes)
     if isinstance(ctx, list) or "questions" in kwargs:
         q_list = ctx if isinstance(ctx, list) else kwargs["questions"]
@@ -2579,6 +3065,19 @@ def regenerate_missing_slots(
 
     if not result:
         result = ctx.get("result") or ctx.get("gen_result")
+    if not result and session_id:
+        cp = load_generation_checkpoint(session_id, cache_dir=cache_dir)
+        if cp and "completed_slots" in cp:
+            loaded_slots = cp["completed_slots"]
+            max_idx = max((int(k) for k in loaded_slots.keys()), default=-1)
+            reconstructed_q = []
+            for i in range(max_idx + 1):
+                item = loaded_slots.get(i) or loaded_slots.get(str(i))
+                if item and item.get("question"):
+                    reconstructed_q.append(item["question"])
+                else:
+                    reconstructed_q.append(None)
+            result = {"questions": reconstructed_q, "unfilled": [], "rejected": []}
     if not result or not isinstance(result, dict):
         raise ValueError("Please click Generate first before regenerating. Missing or empty generation result.")
 
@@ -2719,12 +3218,34 @@ def regenerate_missing_slots(
             orig_slot = original_slots[idx] if idx < len(original_slots) else (q or {})
             u_rec = dict(orig_slot)
             if q:
-                u_rec["reason"] = q.get("reason") or q.get("review_reason") or "Generation incomplete"
+                u_rec["reason"] = q.get("review_reason") or (f"Generation failed [{q.get('reason_code', ReasonCode.UNKNOWN_EXCEPTION.value)}]: {q.get('reason', 'criteria check failed')}")
                 u_rec["hint"] = q.get("hint") or "Select additional chapters or adjust CO target weights"
             updated_unfilled.append(u_rec)
 
     updated_rejected = list(result.get("rejected", [])) + list(new_results.get("rejected", []))
     merged_warnings = list(dict.fromkeys(result.get("warnings", []) + new_results.get("warnings", [])))
+
+    if session_id:
+        checkpoint_slots = {}
+        for idx, q in enumerate(merged_questions):
+            orig_slot = original_slots[idx] if idx < len(original_slots) else (q or {})
+            is_valid = bool(q and q.get("valid", True) and not str(q.get("question", "")).startswith("[NEEDS REVIEW"))
+            status = "ok" if is_valid else "placeholder"
+            checkpoint_slots[idx] = {
+                "status": status,
+                "question": q,
+                "slot": orig_slot,
+                "elapsed_time": q.get("elapsed_time", 0.0) if q else 0.0,
+                "calls_used": q.get("calls_used", 1 if is_valid else 0) if q else 0,
+                "reason_code": q.get("reason_code") if q else ("" if is_valid else "INCOMPLETE"),
+                "slot_idx": idx,
+            }
+        save_generation_checkpoint(
+            session_id=session_id,
+            completed_slots=checkpoint_slots,
+            metadata={"total_slots": total_expected, "regenerated_count": len(incomplete_indices)},
+            cache_dir=cache_dir,
+        )
 
     return {
         "questions": merged_questions,

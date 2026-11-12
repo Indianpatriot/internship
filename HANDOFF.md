@@ -452,3 +452,81 @@ Provides the lightweight `@timed` and `timed()` context manager to track executi
 2. **Vectorized Matrix Multiplication**: Outcome scoring computes batch cosine similarity using `numpy.dot` instead of iterative loops.
 3. **Multi-Level Caching**: Chunk embeddings and CO similarity matrices cached on disk in `.cache/ingestion/` and in-memory; figure PNGs cached in `.cache/figures/`.
 4. **Fast Diagram Detection**: Pre-filters questions using regex keyword checks before invoking semantic embedding searches.
+
+---
+
+## 9. Generation Pipeline Stability & Ollama Performance Configuration
+
+### Root Cause Analysis (Measured Under Load)
+On entry-level GPU hardware (such as 4 GB VRAM laptop GPUs), running 8B parameter models (`llama3.1:8b`) causes partial offloading (e.g. 16 of 32 layers offloaded to VRAM), leading to CPU layer execution at ~3-6 tok/s. This revealed several cascade bottlenecks:
+1. Concurrency queueing: Concurrent worker threads overwhelmed Ollama's default single-stream capacity (`OLLAMA_NUM_PARALLEL=1`), creating queuing delays.
+2. Static timeouts: 10-mark questions requiring ~90-160s exceeded fixed 120s HTTP timeouts, triggering client-side socket aborts and HTTP 500 retries.
+3. Retry multiplication: Unbounded retry loops multiplied calls (up to 27 calls per failed slot), filling system swap and exhausting RAM.
+4. Opaque diagnostics: Untyped exceptions defaulted to generic fallbacks without actionable remediation hints.
+
+### 8-Step Stabilization Architecture
+
+#### 1. Worker Concurrency Clamping
+- Ollama inference is strictly clamped to `workers=1` across the UI (`app.py`) and generator (`generation/generator.py`), preventing queue contention on local GPUs.
+- Configurable via `ALLOW_PARALLEL_OLLAMA` in `config.py` (defaults to `False`).
+- `MockClient` preserves multi-worker concurrency for fast local development and unit tests.
+
+#### 2. Streaming Timeouts & Token Velocity Measurement
+- Replaced monolithic blocking HTTP requests with `stream=True` in `generation/ollama_client.py`.
+- Enforces an inactivity (no-token) timeout (`OLLAMA_INACTIVITY_TIMEOUT = 60.0s`) plus a dynamic hard cap scaled by `num_predict / measured_tok_s`. Slow but actively streaming responses are never aborted prematurely.
+- Streams explicitly close the underlying socket in a `finally` block to prevent lingering server-side generation loops.
+- Automatically calculates and logs `eval_count / eval_duration` as measured token velocity (`tok/s`).
+
+#### 3. Strict Per-Slot Call Budget
+- Added `MAX_SLOT_CALL_BUDGET = 6` in `config.py`.
+- `SlotBudgetClient` acts as a decorator tracking LLM invocations per slot. Once the budget is reached, `SlotBudgetExceededError` is raised, immediately halting retries for that slot.
+- Capped transport-level retries to a maximum of 2, and reduced inner question and answer retry loops to 1-2 for Ollama.
+
+#### 4. Explicit Failure Diagnostics & Actionable Hints
+- Extended `ReasonCode` enum in `generation/diagnostics.py` with typed failure classifications (`BUDGET_EXCEEDED`, `SCHEME_VALIDATION`, `GROUNDING_FAIL`, `BLOOM_VERB_FAIL`, `STEM_LINT`, `CONN_FAIL`, `TIMEOUT`).
+- Removed all generic "generation incomplete" fallbacks.
+- Every placeholder question displays `[REASON_CODE]` and an actionable hint (e.g. selecting additional chapters or adjusting weights) in the UI and the faculty export review column.
+
+#### 5. Single-Call Answer & Marking Scheme Generation
+- Merged model answer generation and itemized marking scheme criteria into a single combined LLM call using `build_combined_answer_scheme_prompt`.
+- Validates criteria sum (`sum(criteria.marks) == question.marks`) with automatic deterministic redistribution via `repair_scheme_marks()`, eliminating unnecessary re-generation calls.
+- Reduces LLM invocations per slot by ~33%.
+
+#### 6. Detailed Preflight & Runtime Estimation
+- Implemented `OllamaClient.detailed_preflight_check()` in `generation/ollama_client.py`:
+  - Verifies server reachability and model availability via `/api/tags`.
+  - Queries `/api/ps` to determine whether the model is loaded in VRAM and computes exact GPU layer offload percentage (`size_vram / size`).
+  - Queries system RAM and swap usage via `psutil`.
+  - Performs a lightweight warm-up generation call to sample real-time token speed (`measured_tok_s`).
+  - Estimates total paper generation runtime and raises an advisory warning if estimated duration exceeds 90 minutes.
+- Added a model preset selector in `app.py` recommending 3B models (`llama3.2:3b`, `qwen2.5:3b-instruct`) for 4 GB VRAM GPUs.
+
+#### 7. Incremental Progress Tracking & Resilient Disk Persistence
+- Per-slot generation tracking records `elapsed_time`, `calls_used`, and `reason_code` directly in slot records.
+- Completed slots are incrementally written to disk in `.cache/generation_progress_<session_id>.json` using safe atomic writes.
+- `generate_paper_by_slots` and `regenerate_missing_slots` resume directly from saved disk checkpoints, bypassing already-completed questions.
+- Real-time progress callback in `app.py` surfaces live elapsed seconds, call counts, and reason codes per slot.
+
+#### 8. Recommended Ollama Environment Variables
+For optimal stability and speed on local GPUs (especially 4 GB VRAM systems):
+
+```bash
+# Recommended environment variables for local Ollama server:
+export OLLAMA_NUM_PARALLEL=1         # CRITICAL: prevents parallel KV cache duplication on GPU
+export OLLAMA_MAX_LOADED_MODELS=1    # Ensures only one model is loaded in VRAM
+export OLLAMA_FLASH_ATTENTION=1      # Enables Flash Attention to reduce memory footprint
+export OLLAMA_KV_CACHE_TYPE=q8_0     # Quantizes KV cache to 8-bit, fitting context into VRAM
+export OLLAMA_KEEP_ALIVE=30m         # Prevents model unloading between generation runs
+ollama serve
+```
+
+Windows PowerShell equivalent:
+```powershell
+$env:OLLAMA_NUM_PARALLEL="1"
+$env:OLLAMA_MAX_LOADED_MODELS="1"
+$env:OLLAMA_FLASH_ATTENTION="1"
+$env:OLLAMA_KV_CACHE_TYPE="q8_0"
+$env:OLLAMA_KEEP_ALIVE="30m"
+ollama serve
+```
+

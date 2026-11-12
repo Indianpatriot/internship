@@ -515,7 +515,10 @@ def generate_scheme(
                 parsed["is_fallback"] = False
                 return parsed  # type: ignore
 
-    for attempt in range(max_retries):
+    is_mock = (model_name == "mock") or (getattr(client, "__class__", type("")).__name__ == "MockClient")
+    effective_retries = max_retries if is_mock else min(max_retries, 1)
+
+    for attempt in range(effective_retries):
         try:
             raw_response = client.generate(
                 prompt,

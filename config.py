@@ -5,6 +5,7 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.4"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
+OLLAMA_INACTIVITY_TIMEOUT = float(os.getenv("OLLAMA_INACTIVITY_TIMEOUT", "60.0"))
 
 # Chunking
 MAX_CHUNK_WORDS = int(os.getenv("MAX_CHUNK_WORDS", "350"))
@@ -35,6 +36,8 @@ FILTER_USE_LLM = os.getenv("FILTER_USE_LLM", "false").lower() in ("1", "true", "
 
 # Performance & Parallel Generation
 GENERATION_WORKERS = int(os.getenv("GENERATION_WORKERS", "3"))
+ALLOW_PARALLEL_OLLAMA: bool = os.getenv("ALLOW_PARALLEL_OLLAMA", "false").lower() in ("1", "true", "yes")
+MAX_SLOT_CALL_BUDGET: int = int(os.getenv("MAX_SLOT_CALL_BUDGET", "6"))
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "4"))

@@ -180,6 +180,25 @@ class MockClient:
         elif self.fail_mode == "bloom_verb_fail" and not ("Model Answer:" in prompt or "authoritative model answer" in prompt):
             return "Predict the cosmological future evolution of quantum entanglement?"
 
+        # Combined answer and marking scheme prompt
+        if "generate BOTH the grounded model answer AND an itemized marking scheme breakdown" in prompt:
+            ans = self._generate_answer(prompt)
+            sch_str = self._generate_marking_scheme(prompt)
+            import json
+            try:
+                sch_json = json.loads(sch_str)
+            except Exception:
+                sch_json = {"criteria": [{"no": 1, "criterion": "Core concepts", "expected": ans, "marks": 5, "kind": "explanation", "reason": "Evaluates core technical concepts"}]}
+            m_match = re.search(r"Total Marks:\s*(\d+)", prompt)
+            marks_val = int(m_match.group(1)) if m_match else 5
+            return json.dumps({
+                "answer": ans,
+                "answer_alternatives": [],
+                "criteria": sch_json.get("criteria", []),
+                "total_marks": marks_val,
+                "notes": sch_json.get("notes", "Evaluation guidance notes"),
+            })
+
         # Marking scheme prompt (strict JSON format)
         if "MARKING SCHEME in strict JSON format" in prompt or "Now generate the marking scheme JSON for:" in prompt:
             return self._generate_marking_scheme(prompt)

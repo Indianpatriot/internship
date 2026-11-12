@@ -357,7 +357,11 @@ def extract_qa_flags_cell(q: dict[str, Any]) -> str:
             norm_flags.append("RUBRIC")
         elif "generation_failed" in fl:
             code = q.get("reason_code")
-            norm_flags.append(f"FAILED:{code}" if code else "FAILED")
+            hint = q.get("hint")
+            label = f"FAILED:{code}" if code else "FAILED"
+            if hint:
+                label += f" ({hint})"
+            norm_flags.append(label)
         else:
             cleaned = str(f).strip().upper()[:16]
             if cleaned:

@@ -284,6 +284,9 @@ if "gen_result" not in st.session_state:
     st.session_state.gen_result = None
 if "regen_count" not in st.session_state:
     st.session_state.regen_count = 0
+if "generation_session_id" not in st.session_state:
+    import uuid
+    st.session_state.generation_session_id = uuid.uuid4().hex[:12]
 
 if "institution_name" not in st.session_state:
     st.session_state.institution_name = "EXAMINATION QUESTION PAPER"
@@ -318,11 +321,27 @@ with st.sidebar:
         help="Toggle between offline MockClient and local Ollama server.",
     )
 
-    model_name = st.text_input(
-        "Model Name",
-        value=config.OLLAMA_MODEL,
-        help="Name of the model running on your local Ollama server.",
+    model_presets = [
+        "llama3.2:3b (Recommended: fits 4 GB VRAM, 15-25 tok/s)",
+        "qwen2.5:3b-instruct (Fast 3B model, high quality)",
+        "llama3.1:8b (Default 8B: needs >6 GB VRAM for full GPU offload)",
+        "Custom...",
+    ]
+    default_idx = 2 if "8b" in config.OLLAMA_MODEL else (0 if "3.2" in config.OLLAMA_MODEL else 1)
+    selected_preset = st.selectbox(
+        "Model Selection",
+        options=model_presets,
+        index=default_idx,
+        help="Choose a model. For 4 GB VRAM GPUs, 3B models fit completely in VRAM and run 4-6x faster.",
     )
+    if "Custom" in selected_preset:
+        model_name = st.text_input(
+            "Custom Model Name",
+            value=config.OLLAMA_MODEL,
+            help="Name of the model running on your local Ollama server.",
+        )
+    else:
+        model_name = selected_preset.split()[0]
 
     if use_mock:
         st.warning("⚠️ **Mock Client Active**: Offline mode enabled. Questions generate instantaneously without Ollama.")
@@ -1415,6 +1434,14 @@ with col_gen_msg:
     elif unmapped_units and len(books) > 1:
         st.caption("ℹ️ Unmapped units search across all textbook content.")
 
+from generation.generator import load_generation_checkpoint
+saved_cp = load_generation_checkpoint(st.session_state.generation_session_id)
+if saved_cp and saved_cp.get("completed_slots") and st.session_state.results is None:
+    comp_slots = saved_cp["completed_slots"]
+    ok_count = sum(1 for s in comp_slots.values() if s.get("status") == "ok")
+    tot_count = len(comp_slots)
+    st.info(f"💾 Found saved generation checkpoint on disk ({ok_count}/{tot_count} slots completed). Generating will resume from saved slots.")
+
 if generate_clicked:
     if not uploaded_pdfs:
         st.error("Please upload at least one textbook PDF before generating.")
@@ -1427,9 +1454,14 @@ if generate_clicked:
     else:
         if not use_mock:
             probe_client = OllamaClient(model=model_name)
-            if not probe_client.is_up():
-                st.error("⚠️ **Ollama service is not reachable.** Please ensure Ollama is running (`ollama serve`) or switch to 'Mock Client' in the sidebar.")
+            preflight = probe_client.detailed_preflight_check(slot_count=len(st.session_state.slots))
+            if not preflight["ok"]:
+                st.error(f"⚠️ **Preflight Check Failed [{preflight.get('reason_code', 'CONN_FAIL')}]:** {preflight['message']}")
                 st.stop()
+            for w in preflight.get("warnings", []):
+                st.warning(f"⚠️ **Preflight Advisory:** {w}")
+            if preflight.get("gpu_offload_pct") is not None:
+                st.info(f"📊 **GPU Offload:** {preflight['gpu_offload_pct']}% | **Token Speed:** ~{preflight.get('measured_tok_s', 0):.1f} tok/s | **Estimated Total:** ~{preflight.get('est_minutes', 0):.0f} min")
 
         with st.status("Executing Generation Pipeline...", expanded=True) as status_box:
             status_box.write(f"📄 Filtered to {len(filtered_chunks)} chunk(s) from selected chapter(s)...")
@@ -1463,7 +1495,22 @@ if generate_clicked:
                 cnt = progress_state["count"]
                 progress_bar.progress(min(cnt / max(total_slots, 1), 1.0))
                 s_id = rec.get("slot_id") or rec.get("id") or f"Slot {cnt}"
-                status_text.markdown(f"⏳ **Generated {cnt} of {total_slots}** question slots (completed `{s_id}`)...")
+                elapsed = rec.get("elapsed_time")
+                calls = rec.get("calls_used", 1)
+                r_code = rec.get("reason_code")
+                perf_info = []
+                if elapsed is not None:
+                    perf_info.append(f"{elapsed:.1f}s")
+                if calls:
+                    perf_info.append(f"{calls} call{'s' if calls != 1 else ''}")
+                if r_code:
+                    perf_info.append(f"code: {r_code}")
+                perf_str = f" ({', '.join(perf_info)})" if perf_info else ""
+                status_text.markdown(f"⏳ **Generated {cnt} of {total_slots}** question slots (completed `{s_id}`{perf_str})...")
+
+            is_mock_client = (getattr(client, "model", "") == "mock") or (getattr(client, "__class__", type("")).__name__ == "MockClient")
+            allow_parallel = getattr(config, "ALLOW_PARALLEL_OLLAMA", False)
+            worker_count = config.GENERATION_WORKERS if (is_mock_client or allow_parallel) else 1
 
             unit_sources = st.session_state.get("unit_sources") or (st.session_state.scheme.get("unit_sources") if st.session_state.scheme else None)
             results = generate_paper_by_slots(
@@ -1473,11 +1520,12 @@ if generate_clicked:
                 seed=42,
                 on_progress=on_progress_callback,
                 unit_sources=unit_sources,
-                workers=config.GENERATION_WORKERS,
+                workers=worker_count,
                 force_regenerate=force_regenerate,
                 keep_placeholders=True,
                 outcome_descs=outcomes_dict,
                 exclude_deprecated=exclude_deprecated,
+                session_id=st.session_state.generation_session_id,
             )
             progress_bar.progress(1.0)
             status_text.empty()
@@ -1500,6 +1548,7 @@ if generate_clicked:
             st.session_state.results = results
             st.session_state["gen_result"] = results
             st.session_state["gen_ctx"] = {
+                "session_id": st.session_state.generation_session_id,
                 "scored_chunks": scored_chunks,
                 "outcomes": outcomes_dict,
                 "slots": list(st.session_state.slots),
@@ -1557,6 +1606,7 @@ if st.session_state.results:
                                 ctx=st.session_state["gen_ctx"],
                                 result=current_gen_result,
                                 seed_bump=regen_count,
+                                session_id=st.session_state.get("generation_session_id"),
                             )
                             st.session_state["gen_result"] = regen_res
                             st.session_state.results = regen_res
@@ -1574,7 +1624,11 @@ if st.session_state.results:
             for fq in flagged_slots:
                 f_id = fq.get("id", "Slot")
                 f_flags = fq.get("review_flags", [fq.get("review_reason", "Review needed")])
-                st.markdown(f"**{f_id}** ({fq.get('level')}, {fq.get('co')}): `{', '.join(f_flags)}`")
+                f_code = fq.get("reason_code")
+                code_badge = f"`[{f_code}]` " if f_code else ""
+                f_hint = fq.get("hint")
+                hint_str = f" — 💡 *Hint:* {f_hint}" if f_hint else ""
+                st.markdown(f"**{f_id}** ({fq.get('level')}, {fq.get('co')}): {code_badge}`{', '.join(f_flags)}`{hint_str}")
                 if fq.get("ungrounded_sentences"):
                     st.caption("Flagged ungrounded statements:")
                     for us in fq["ungrounded_sentences"]:
@@ -1585,6 +1639,10 @@ if st.session_state.results:
                 report_lines.append(f"Question: {fq.get('id')} ({fq.get('level')}, {fq.get('co')})")
                 report_lines.append(f"Stem: {fq.get('question')}")
                 report_lines.append(f"Flags: {', '.join(fq.get('review_flags', []))}")
+                if fq.get("reason_code"):
+                    report_lines.append(f"Reason Code: {fq.get('reason_code')}")
+                if fq.get("hint"):
+                    report_lines.append(f"Remediation Hint: {fq.get('hint')}")
                 if fq.get("ungrounded_sentences"):
                     report_lines.append("Ungrounded sentences:")
                     for us in fq["ungrounded_sentences"]:
@@ -1603,10 +1661,12 @@ if st.session_state.results:
             u_id = u.get("id") or f"Slot {u.get('question_no', '')}"
             u_unit = f"Unit {u.get('unit')} " if u.get('unit') is not None else ""
             u_co = u.get("co", "")
+            u_code = u.get("reason_code")
+            code_badge = f"`[{u_code}]` " if u_code else ""
             u_reason = u.get("reason") or u.get("review_reason") or "No suitable content or validation failed"
             u_hint = u.get("hint")
-            hint_str = f" Try: *{u_hint}*" if u_hint else ""
-            st.markdown(f"- **{u_unit}{u_id}** ({u_co}, {u.get('level', '')}, {u.get('marks', '')}m): {u_reason}.{hint_str}")
+            hint_str = f" — 💡 *Action:* {u_hint}" if u_hint else ""
+            st.markdown(f"- **{u_unit}{u_id}** ({u_co}, {u.get('level', '')}, {u.get('marks', '')}m): {code_badge}{u_reason}.{hint_str}")
 
     if questions:
         table_data = [

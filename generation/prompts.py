@@ -263,3 +263,66 @@ def build_scheme_prompt(
         context_section=context_section,
     )
 
+
+
+COMBINED_ANSWER_SCHEME_BASE = """You are an expert academic evaluator. Given the question, context text, Bloom's Taxonomy cognitive level, and marks below, generate BOTH the grounded model answer AND an itemized marking scheme breakdown in strict JSON format.
+
+Context:
+\"\"\"
+{context}
+\"\"\"
+
+Question:
+{question}
+
+Cognitive Level: {level}
+Total Marks: {marks}
+
+Instructions:
+1. "answer": Provide a clear, comprehensive model answer strictly grounded in the context text above.
+2. "criteria": Provide itemized checkable criteria for grading this answer.
+   - Each criterion must have:
+     * "no": integer sequence (1, 2, ...)
+     * "criterion": concise title of expected point
+     * "expected": what examiner checks for in the answer
+     * "marks": integer or half-mark allocation (> 0)
+     * "kind": one of "definition", "explanation", "points", "diagram", "example", "steps", "code", "comparison"
+     * "reason": pedagogical reason why this criterion earns marks
+   - CRITICAL REQUIREMENT: The sum of marks across all criteria MUST equal EXACTLY {marks}.
+3. "notes": Any brief guidance for the examiner.
+
+Respond ONLY with a valid JSON object starting with '{{' and ending with '}}':
+{{
+  "answer": "...",
+  "answer_alternatives": [],
+  "criteria": [
+    {{
+      "no": 1,
+      "criterion": "...",
+      "expected": "...",
+      "marks": 2,
+      "kind": "explanation",
+      "reason": "..."
+    }}
+  ],
+  "total_marks": {marks},
+  "notes": "..."
+}}
+"""
+
+
+def build_combined_answer_scheme_prompt(
+    question: str,
+    context: str,
+    marks: Optional[int] = None,
+    level: Optional[str] = None,
+) -> str:
+    """Build prompt for generating both model answer and marking scheme in a single LLM call."""
+    m = marks if marks is not None and marks > 0 else 5
+    lvl = normalize_level(level) if level else "L2"
+    return COMBINED_ANSWER_SCHEME_BASE.format(
+        context=context.strip(),
+        question=question.strip(),
+        marks=m,
+        level=lvl,
+    )

@@ -27,6 +27,8 @@ class ReasonCode(str, Enum):
     UNGROUNDED_TOKEN = "UNGROUNDED_TOKEN"
     CO_MISMATCH = "CO_MISMATCH"
     OUTDATED = "OUTDATED"
+    SCHEME_VALIDATION = "SCHEME_VALIDATION"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     UNKNOWN_EXCEPTION = "UNKNOWN_EXCEPTION"
 
 
@@ -45,6 +47,8 @@ REASON_HINTS: dict[ReasonCode, str] = {
     ReasonCode.UNGROUNDED_TOKEN: "Answer references specific commands, tools, or flags not present in source chunks.",
     ReasonCode.CO_MISMATCH: "Question content does not align strongly with the assigned Course Outcome description.",
     ReasonCode.OUTDATED: "Question references deprecated or legacy technologies from the currency watchlist.",
+    ReasonCode.SCHEME_VALIDATION: "Marking scheme criteria failed sum validation (criteria marks must sum to question marks).",
+    ReasonCode.BUDGET_EXCEEDED: "Slot exceeded maximum allowed LLM call budget. Check chunk content quality or raise budget.",
     ReasonCode.UNKNOWN_EXCEPTION: "An unexpected exception occurred during slot processing. Review server logs.",
 }
 
