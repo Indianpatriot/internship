@@ -34,8 +34,10 @@ def _m():
     if _model is None:
         with _model_lock:
             if _model is None:
+                import torch
                 from sentence_transformers import SentenceTransformer
-                _model = SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                _model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
     return _model
 
 
