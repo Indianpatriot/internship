@@ -164,6 +164,7 @@ def get_cached_docx_paper(
     include_qa_flags=None,
     include_marking_scheme=True,
     include_reasons=True,
+    include_figures=True,
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_docx_exam_paper(
@@ -184,6 +185,7 @@ def get_cached_docx_paper(
         exam_type=exam_type,
         semester=semester,
         include_qa_flags=include_qa_flags,
+        include_figures=include_figures,
     )
 
 
@@ -204,6 +206,7 @@ def get_cached_pdf_paper(
     include_qa_flags=None,
     include_marking_scheme=True,
     include_reasons=True,
+    include_figures=True,
 ):
     outcomes_map = dict(outcomes_tuple) if outcomes_tuple else {}
     return create_pdf_exam_paper(
@@ -224,6 +227,7 @@ def get_cached_pdf_paper(
         exam_type=exam_type,
         semester=semester,
         include_qa_flags=include_qa_flags,
+        include_figures=include_figures,
     )
 
 
@@ -1671,6 +1675,29 @@ if st.session_state.results:
                             st.caption(f"**Examiner Notes:** {scheme['notes']}")
                         if is_fb:
                             st.caption("⚠️ * This marking scheme was auto-generated from rule-based templates. Please review before use.")
+
+                        # Show matched textbook figure(s) under diagram criterion
+                        all_figs = []
+                        for c in scheme.get("criteria", []):
+                            if c.get("figures"):
+                                all_figs.extend(c["figures"])
+                        if scheme.get("reference_figures"):
+                            all_figs.extend(scheme["reference_figures"])
+
+                        has_diag_crit = any(c.get("kind") == "diagram" for c in scheme.get("criteria", []))
+                        if all_figs:
+                            st.markdown("##### 🖼️ Textbook Diagrams & Reference Figures")
+                            for f_item in all_figs:
+                                f_img = f_item.get("image_path")
+                                if f_img and os.path.exists(f_img):
+                                    st.image(f_img, caption=f_item.get("caption", "Diagram"), use_column_width=True)
+                                    st.caption(f"**Source:** {f_item.get('book_title', 'Textbook')}, Page {f_item.get('page', '')}")
+                        elif has_diag_crit:
+                            diag_c = [c for c in scheme.get("criteria", []) if c.get("kind") == "diagram"][0]
+                            st.info(
+                                f"ℹ️ *No figure available in the textbook for this topic. "
+                                f"Expected: hand-drawn diagram showing: {diag_c.get('expected', 'key architectural components')}*"
+                            )
                     else:
                         st.info("Marking scheme not available.")
 
@@ -1732,6 +1759,11 @@ if st.session_state.results:
                 "Include reasons",
                 value=True,
                 help="Include pedagogical justification / examiner reasoning column in the marking scheme table.",
+            )
+            include_figures = st.checkbox(
+                "Include textbook figures in scheme",
+                value=True,
+                help="Attach matched diagrams and figures from the uploaded textbook into the marking scheme.",
             )
 
         # Calculate totals summary if requested
@@ -1815,6 +1847,7 @@ if st.session_state.results:
             include_totals=True,
             include_marking_scheme=include_marking_scheme,
             include_reasons=include_reasons,
+            include_figures=include_figures,
             totals_summary_data=totals_summary,
             profile="faculty",
             include_qa_flags=True,
@@ -1830,6 +1863,7 @@ if st.session_state.results:
             include_totals=True,
             include_marking_scheme=include_marking_scheme,
             include_reasons=include_reasons,
+            include_figures=include_figures,
             totals_summary_data=totals_summary,
             profile="faculty",
             include_qa_flags=True,

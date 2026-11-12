@@ -23,6 +23,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import (
+    Image as RLImage,
+    KeepTogether,
     PageBreak,
     Paragraph,
     Preformatted,
@@ -383,6 +385,7 @@ def create_docx_exam_paper(
     semester: str = "",
     date_str: str = "",
     include_qa_flags: Optional[bool] = None,
+    include_figures: bool = True,
 ) -> bytes:
     """Generate a formatted Microsoft Word (.docx) exam question paper.
 
@@ -830,6 +833,48 @@ def create_docx_exam_paper(
                     r_note.font.size = Pt(8.0)
                     r_note.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
 
+                # Textbook Diagram / Figure rendering
+                if include_figures:
+                    all_figs = []
+                    for c in crit_list:
+                        if c.get("figures"):
+                            all_figs.extend(c["figures"])
+                    if scheme.get("reference_figures"):
+                        all_figs.extend(scheme["reference_figures"])
+
+                    has_diagram_criterion = any(c.get("kind") == "diagram" for c in crit_list)
+
+                    if all_figs:
+                        for fig_item in all_figs:
+                            img_p = fig_item.get("image_path")
+                            if img_p and os.path.exists(img_p):
+                                try:
+                                    doc.add_paragraph("")
+                                    doc.add_picture(img_p, width=Inches(min(5.5, 5.0)))
+                                    cap_p = doc.add_paragraph()
+                                    cap_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    c_run = cap_p.add_run(f"Figure: {fig_item.get('caption', 'Textbook Figure')}\n")
+                                    c_run.bold = True
+                                    c_run.font.size = Pt(8.5)
+                                    src_run = cap_p.add_run(f"Source: {fig_item.get('book_title', 'Textbook')}, Page {fig_item.get('page', '')}")
+                                    src_run.italic = True
+                                    src_run.font.size = Pt(8.0)
+                                    src_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+                                except Exception:
+                                    pass
+                    elif has_diagram_criterion:
+                        diag_crits = [c for c in crit_list if c.get("kind") == "diagram"]
+                        exp_labels = diag_crits[0].get("expected", "key architectural components")
+                        no_fig_p = doc.add_paragraph()
+                        no_fig_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        nf_run = no_fig_p.add_run(
+                            f"Diagram Guidance: No figure available in the textbook for this topic. "
+                            f"Expected: hand-drawn diagram showing: {exp_labels}"
+                        )
+                        nf_run.italic = True
+                        nf_run.font.size = Pt(8.5)
+                        nf_run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
+
                 if scheme.get("is_fallback"):
                     p_fb = doc.add_paragraph()
                     r_fb = p_fb.add_run("* Auto-generated structure; review before use.")
@@ -1043,6 +1088,7 @@ def create_pdf_exam_paper(
     semester: str = "",
     date_str: str = "",
     include_qa_flags: Optional[bool] = None,
+    include_figures: bool = True,
 ) -> bytes:
     """Generate a formatted PDF exam question paper using ReportLab.
 
@@ -1510,6 +1556,44 @@ def create_pdf_exam_paper(
                 if scheme.get("is_fallback"):
                     elements.append(Spacer(1, 2))
                     elements.append(Paragraph("<i>* Auto-generated structure; review before use.</i>", styles["Normal"]))
+
+                # Textbook Diagram / Figure rendering
+                if include_figures:
+                    all_figs = []
+                    for c in crit_list:
+                        if c.get("figures"):
+                            all_figs.extend(c["figures"])
+                    if scheme.get("reference_figures"):
+                        all_figs.extend(scheme["reference_figures"])
+
+                    has_diagram_criterion = any(c.get("kind") == "diagram" for c in crit_list)
+
+                    if all_figs:
+                        for fig_item in all_figs:
+                            img_p = fig_item.get("image_path")
+                            if img_p and os.path.exists(img_p):
+                                try:
+                                    img_flow = [
+                                        RLImage(img_p, width=min(450, 400), height=min(260, 230), kind="proportional"),
+                                        Paragraph(
+                                            f"<b>Figure:</b> {safe_xml_text(fig_item.get('caption', 'Diagram'))} | "
+                                            f"<i>Source: {safe_xml_text(fig_item.get('book_title', 'Textbook'))}, Page {fig_item.get('page', '')}</i>",
+                                            styles["Normal"]
+                                        ),
+                                    ]
+                                    elements.append(Spacer(1, 4))
+                                    elements.append(KeepTogether(img_flow))
+                                except Exception:
+                                    pass
+                    elif has_diagram_criterion:
+                        diag_crits = [c for c in crit_list if c.get("kind") == "diagram"]
+                        exp_labels = diag_crits[0].get("expected", "key architectural components")
+                        elements.append(Spacer(1, 3))
+                        elements.append(Paragraph(
+                            f"<i>Diagram Guidance: No figure available in the textbook for this topic. "
+                            f"Expected: hand-drawn diagram showing: {safe_xml_text(exp_labels)}</i>",
+                            styles["Normal"]
+                        ))
 
                 elements.append(Spacer(1, 6))
 
